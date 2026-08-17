@@ -1,0 +1,13 @@
+[package]
+name = "torda-ocsf"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[lib]
+name = "torda_ocsf"
+path = "src/lib.rs"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true

@@ -1,0 +1,55 @@
+[workspace]
+resolver = "2"
+members = [
+  "crates/ocsf",
+  "crates/findings",
+  "crates/compliance",
+  "crates/core",
+  "crates/substrate",
+  "crates/modules/asset",
+  "crates/modules/health",
+  "crates/modules/vuln",
+  "crates/modules/compliance",
+  "crates/modules/drift",
+  "crates/modules/fim",
+  "crates/modules/procmon",
+  "crates/modules/netmon",
+  "crates/modules/filemon",
+  "crates/modules/corr",
+  "crates/agent",
+  "server/findings-engine",
+  "server/ingest",
+  "server/remediation",
+  "server/control-plane",
+  "server/transport",
+  "server/transport-tls",
+]
+# The Linux kernel-side eBPF crates are EXCLUDED, not members: they only build
+# for `bpfel-unknown-none` under a nightly + bpf-linker toolchain (in WSL), so the
+# default cross-platform `cargo build` must never try to compile them. They are
+# built on demand by `torda-substrate`'s build.rs when `--features linux-ebpf` is on
+# and the target OS is Linux. Both stay reachable as path dependencies.
+exclude = [
+  "crates/substrate-ebpf",
+  "crates/substrate-ebpf-common",
+]
+
+[workspace.package]
+edition = "2021"
+# Default for every crate EXCEPT the two backend-moat crates that override to
+# FSL-1.1-ALv2 via their own `license-file`: server/findings-engine and
+# server/ingest. See LICENSING.md for the split and why.
+license = "Apache-2.0"
+version = "0.1.0"
+repository = "https://github.com/qlucent/torda"
+
+[workspace.dependencies]
+anyhow = "1"
+async-trait = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "signal"] }
+sysinfo = "0.30"
+ed25519-dalek = "2"
+hex = "0.4"

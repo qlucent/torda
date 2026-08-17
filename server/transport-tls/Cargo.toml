@@ -1,0 +1,32 @@
+[package]
+name = "torda-transport-tls"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[lib]
+name = "torda_transport_tls"
+path = "src/lib.rs"
+
+[dependencies]
+torda-transport = { path = "../transport" }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+# PEM parsing for ops-provisioned cert/key files comes from rustls' OWN pki-types crate
+# (already in the tree via rustls), whose `pem` module is available under the `std`/`alloc`
+# features rustls enables — no separate PEM crate. Declared explicitly so the loaders in
+# certs.rs use a version-matched `rustls::pki_types`.
+rustls-pki-types = { version = "1", features = ["std"] }
+# base64 (already in the dependency tree) is used ONLY to armor DER blobs into PEM in the
+# `write_pki_to_*` test/demo helpers; the crypto itself is untouched. Small, not heavy.
+base64 = "0.22"
+rcgen = "0.13"
+# SHA-256 for deriving the session id from the authenticated peer cert. Already in the
+# tree via rustls' ring provider; used here directly so the hash is audited, not hand-rolled.
+ring = "0.17"
+
+[dev-dependencies]
+torda-control-plane = { path = "../control-plane" }
+torda-remediation = { path = "../remediation" }
+# The stub orchestrator `Executor` in mtls_channel.rs implements `Executor`, whose methods
+# return `anyhow::Result<()>`; anyhow is already a first-party workspace dependency.
+anyhow.workspace = true

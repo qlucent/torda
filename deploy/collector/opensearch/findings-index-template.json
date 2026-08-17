@@ -1,0 +1,67 @@
+{
+  "index_patterns": ["torda-findings-*"],
+  "template": {
+    "settings": {
+      "number_of_shards": 1,
+      "number_of_replicas": 0,
+      "index": {
+        "default_pipeline": "torda-findings-mttr"
+      }
+    },
+    "mappings": {
+      "dynamic": true,
+      "properties": {
+        "time": { "type": "date", "format": "epoch_millis" },
+        "finding_id": { "type": "keyword" },
+        "identity": {
+          "properties": {
+            "asset_id": { "type": "keyword" },
+            "vuln_id": { "type": "keyword" },
+            "component": { "type": "keyword" },
+            "location": { "type": "keyword" }
+          }
+        },
+        "score": {
+          "properties": {
+            "R": { "type": "integer" },
+            "explain": {
+              "properties": {
+                "sev": { "type": "float" },
+                "likelihood": { "type": "float" },
+                "exposure": { "type": "float" },
+                "crit": { "type": "float" },
+                "reach": { "type": "float" }
+              }
+            }
+          }
+        },
+        "decision": { "type": "keyword" },
+        "sla_hours": { "type": "integer" },
+        "remediation_key": { "type": "keyword" },
+        "status": { "type": "keyword" },
+        "first_seen": { "type": "date", "format": "epoch_millis" },
+        "last_seen": { "type": "date", "format": "epoch_millis" },
+        "closed_at": { "type": "date", "format": "epoch_millis" },
+        "mttr_days": { "type": "float" },
+        "asset_ctx": {
+          "properties": {
+            "internet_facing": { "type": "boolean" },
+            "criticality": { "type": "keyword" },
+            "compensating_controls": { "type": "boolean" }
+          }
+        },
+        "enrichment": {
+          "properties": {
+            "cvss_vector": { "type": "keyword" },
+            "cvss_env": { "type": "float" },
+            "epss": { "type": "float" },
+            "epss_pct": { "type": "float" },
+            "kev": { "type": "boolean" },
+            "exploit_maturity": { "type": "keyword" },
+            "vex": { "type": "keyword" }
+          }
+        }
+      }
+    }
+  }
+}

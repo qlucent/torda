@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Report a security vulnerability
+    url: "https://github.com/qlucent/torda/security/advisories/new"
+    about: >-
+      Do NOT open a public issue for a vulnerability. Use GitHub's private
+      vulnerability reporting (Security tab -> "Report a vulnerability"), or
+      see SECURITY.md for the backup contact.

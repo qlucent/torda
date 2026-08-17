@@ -1,0 +1,46 @@
+# Sample systemd unit for torda — runs in daemon mode, streaming OCSF
+# NDJSON to a rotating file on disk. A log shipper (Vector/Filebeat/Splunk-UF)
+# tails that file and carries events to your SIEM; the agent itself makes no
+# network call (see docs/DEPLOY.md).
+#
+# Install:
+#   sudo cp deploy/torda.service /etc/systemd/system/
+#   sudo mkdir -p /etc/torda /var/log/torda
+#   sudo cp deploy/torda.toml /etc/torda/config.toml   # then edit it
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now torda
+#
+# Build the binary referenced by ExecStart first — see docs/DEPLOY.md for the
+# per-OS feature flag (`linux-ebpf` here) and why it needs root/CAP_BPF.
+
+[Unit]
+Description=torda — unified security agent (daemon mode, OCSF file sink)
+Documentation=https://github.com/ (see docs/DEPLOY.md in this repo)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# eBPF collection (process/network/file events) needs root or CAP_BPF+CAP_PERFMON
+# to open kernel probes, and the binary must be built with `--features linux-ebpf`
+# (`cargo build --release --features linux-ebpf` from torda/). Without
+# that feature, or without the required privilege, the agent fails soft to the
+# stub event bus and still runs (snapshot modules keep working) — it will not
+# crash, but it will not capture real kernel events either.
+User=root
+# Config-driven: daemon mode + the file sink are set in the TOML config below.
+# CLI flags still override the config (e.g. append `--output /other/path`).
+ExecStart=/usr/local/bin/torda --config /etc/torda/config.toml
+# Uncomment to bound a run for testing instead of running forever (e.g. a
+# canary/smoke deploy): the agent exits 0 cleanly after N seconds.
+# Environment=TORDA_RUN_SECS=60
+Restart=on-failure
+RestartSec=5s
+
+# Optional hardening (loosen if it conflicts with your eBPF/CAP_BPF setup):
+NoNewPrivileges=false
+ProtectSystem=full
+ReadWritePaths=/var/log/torda
+
+[Install]
+WantedBy=multi-user.target

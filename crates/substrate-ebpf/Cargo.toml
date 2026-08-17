@@ -1,0 +1,25 @@
+[package]
+name = "torda-substrate-ebpf"
+version = "0.0.1"
+edition = "2021"
+license = "Apache-2.0"
+# EXCLUDED from the workspace (root Cargo.toml `[workspace] exclude`). This is
+# the kernel-side eBPF program; it only ever builds for the `bpfel-unknown-none`
+# target via `cargo +nightly build` (see `.cargo/config.toml`). The default
+# Windows/host `cargo build` never touches it. Excluded packages cannot inherit
+# `[workspace.package]`, so edition/version/license are explicit.
+
+[[bin]]
+name = "torda-substrate-ebpf"
+path = "src/main.rs"
+
+[dependencies]
+aya-ebpf = "0.2.1"
+torda-substrate-ebpf-common = { path = "../substrate-ebpf-common" }
+
+# Match the aya convention for BPF objects: full debuginfo (BTF) and a single
+# codegen unit so bpf-linker produces one, verifiable object.
+[profile.release]
+debug = 2
+codegen-units = 1
+strip = false

@@ -1,0 +1,15 @@
+[package]
+name = "torda-findings"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[lib]
+name = "torda_findings"
+path = "src/lib.rs"
+
+[dependencies]
+serde.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

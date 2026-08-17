@@ -1,0 +1,64 @@
+{
+  "_note": "NVD COMMUNITY feed snapshot for common Windows desktop apps that OSV does not cover. Each record's CVSS v3.1 base score + vector are REAL, from the NVD 2.0 API (nvd.nist.gov); the affected version ranges are from NVD's CPE configurations. `affected_windows` maps a Windows Add/Remove-Programs DisplayName (via `aliases` substrings) to the affected product + semver range — a CURATED common-app mapping, not the full CPE dictionary. This is a date-stamped, sampled COMMUNITY feed; the live NVD sync with full CPE matching is the enterprise feed, behind the same CveSource trait. EPSS for these CVEs lives in epss-sample.csv; none are CISA-KEV-listed (verified against the KEV catalog v2026.07.16).",
+  "feed_tier": "community",
+  "snapshot_date": "2026-07-20",
+  "source": "NVD 2.0 API (nvd.nist.gov) + FIRST.org EPSS",
+  "records": [
+    {
+      "id": "CVE-2024-31497",
+      "severity": [
+        { "type": "CVSS_V3", "score": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:N/A:N" }
+      ],
+      "database_specific": { "cvss_base_score": 5.9 },
+      "affected_windows": [
+        {
+          "product": "putty",
+          "aliases": ["putty"],
+          "ranges": [ { "introduced": "0.68", "fixed": "0.81" } ]
+        }
+      ]
+    },
+    {
+      "id": "CVE-2023-40031",
+      "severity": [
+        { "type": "CVSS_V3", "score": "CVSS:3.1/AV:L/AC:L/PR:N/UI:R/S:U/C:H/I:H/A:H" }
+      ],
+      "database_specific": { "cvss_base_score": 7.8 },
+      "affected_windows": [
+        {
+          "product": "notepad++",
+          "aliases": ["notepad++"],
+          "ranges": [ { "fixed": "8.5.7" } ]
+        }
+      ]
+    },
+    {
+      "id": "CVE-2023-46850",
+      "severity": [
+        { "type": "CVSS_V3", "score": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H" }
+      ],
+      "database_specific": { "cvss_base_score": 9.8 },
+      "affected_windows": [
+        {
+          "product": "openvpn",
+          "aliases": ["openvpn"],
+          "ranges": [ { "introduced": "2.6.0", "fixed": "2.6.7" } ]
+        }
+      ]
+    },
+    {
+      "id": "CVE-2024-11477",
+      "severity": [
+        { "type": "CVSS_V3", "score": "CVSS:3.1/AV:L/AC:L/PR:N/UI:R/S:U/C:H/I:H/A:H" }
+      ],
+      "database_specific": { "cvss_base_score": 7.8 },
+      "affected_windows": [
+        {
+          "product": "7-zip",
+          "aliases": ["7-zip"],
+          "ranges": [ { "fixed": "24.07" } ]
+        }
+      ]
+    }
+  ]
+}

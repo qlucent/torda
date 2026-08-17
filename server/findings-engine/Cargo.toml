@@ -1,0 +1,14 @@
+[package]
+name = "torda-findings-engine"
+edition.workspace = true
+# FSL-1.1-ALv2 (source-available, non-compete, -> Apache-2.0 after 2 years), NOT the
+# Apache-2.0 workspace default: this is the Findings Engine moat. See LICENSING.md.
+license-file = "LICENSE"
+version.workspace = true
+
+[lib]
+name = "torda_findings_engine"
+path = "src/lib.rs"
+
+[dependencies]
+torda-findings = { path = "../../crates/findings" }

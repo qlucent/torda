@@ -1,0 +1,11 @@
+{
+  "description": "Derive mttr_days (closed_at - first_seen, in days) for findings that carry both timestamps, so the Findings-lifecycle dashboard can aggregate MTTR. This is a COLLECTOR/viewing-layer derivation computed at index time — the agent's Findings Engine emits only first_seen/last_seen/closed_at (rule: never store a field the engine doesn't own); mttr is derivable, so the collector computes it here rather than the engine persisting it. Set as the findings index's default_pipeline (see findings-index-template.json).",
+  "processors": [
+    {
+      "script": {
+        "if": "ctx.closed_at != null && ctx.first_seen != null",
+        "source": "ctx.mttr_days = (ctx.closed_at - ctx.first_seen) / 86400000.0"
+      }
+    }
+  ]
+}

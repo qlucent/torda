@@ -1,0 +1,13 @@
+/target
+**/*.rs.bk
+Cargo.lock
+.DS_Store
+
+# Tooling / session state
+.fishi/
+
+# SDD scratch
+.superpowers/
+
+# Claude Code agent guidance — not part of the public product
+/CLAUDE.md

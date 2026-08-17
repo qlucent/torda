@@ -1,0 +1,19 @@
+#model_version:v2025.03.14,score_date:2026-07-18T00:00:00+0000
+# EPSS (Exploit Prediction Scoring System) snapshot for the CVEs bundled in
+# osv-bundle.json. Values are REAL, fetched from the FIRST.org EPSS API on the
+# score_date above (EPSS changes daily; a real deployment syncs it — VD-4):
+#   https://api.first.org/data/v1/epss?cve=CVE-2022-3602,CVE-2022-3786,CVE-2018-25032,CVE-2023-38545,CVE-2021-3156
+# Columns are the FIRST.org CSV format: cve,epss,percentile (both 0..1).
+cve,epss,percentile
+CVE-2022-3602,0.907700,0.997940
+CVE-2022-3786,0.924880,0.998140
+CVE-2018-25032,0.520630,0.988370
+CVE-2023-38545,0.784830,0.995380
+CVE-2021-3156,0.992950,0.999340
+# Windows-app CVEs bundled in nvd-bundle.json (NVD community feed). REAL EPSS,
+# fetched from the FIRST.org EPSS API on 2026-07-20 (VD-5):
+#   https://api.first.org/data/v1/epss?cve=CVE-2024-31497,CVE-2023-40031,CVE-2023-46850,CVE-2024-11477
+CVE-2024-31497,0.057730,0.922630
+CVE-2023-40031,0.004900,0.389760
+CVE-2023-46850,0.019990,0.785400
+CVE-2024-11477,0.219850,0.973980

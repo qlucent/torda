@@ -1,0 +1,4 @@
+# The runtime ingest file(s) a user drops/symlinks here (the live agent's
+# --output file, or a copy of events.sample.ndjson) are host-local data, not
+# checked in. Keep the directory itself tracked via ingest/.gitkeep.
+ingest/*.ndjson

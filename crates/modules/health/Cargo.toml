@@ -1,0 +1,16 @@
+[package]
+name = "torda-mod-health"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[lib]
+name = "torda_mod_health"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+serde_json.workspace = true
+torda-core = { path = "../../core" }
+torda-ocsf = { path = "../../ocsf" }

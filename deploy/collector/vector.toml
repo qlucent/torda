@@ -1,0 +1,129 @@
+# Collector-side Vector config: tails the torda OCSF NDJSON file
+# (bind-mounted into this container at /ingest/events.ndjson — either the
+# live agent's --output file or the shipped events.sample.ndjson, copied or
+# symlinked there) and ships every record into OpenSearch, index
+# torda-ocsf-%Y.%m.%d. Contrast with deploy/vector.toml (the MA-1
+# agent-side minimal example, which prints to the console) — this one is the
+# collector's file -> OpenSearch pipeline.
+
+[sources.ua]
+type = "file"
+include = ["/ingest/events.ndjson"]
+read_from = "beginning"
+
+# Each line is already one OCSF JSON object (the agent's NDJSON sink). Parse
+# it out of Vector's wrapping `message` field and set the event timestamp
+# from the envelope's own `time` (epoch millis) so OpenSearch/Dashboards
+# order and histogram on the OCSF time, not on Vector's ingest time.
+# `class_uid`, `class_name`, `severity_id`, `metadata`, `device`, and `data`
+# are kept intact for indexing.
+[transforms.parse_ocsf]
+type = "remap"
+inputs = ["ua"]
+source = '''
+. = parse_json!(.message)
+.@timestamp = from_unix_timestamp!(.time, unit: "milliseconds")
+'''
+
+[sinks.opensearch]
+type = "elasticsearch"
+inputs = ["parse_ocsf"]
+endpoints = ["http://opensearch:9200"]
+mode = "bulk"
+bulk.index = "torda-ocsf-%Y.%m.%d"
+# OpenSearch 2.x speaks the Elasticsearch 7.x bulk API; "v7" is the mode
+# Vector documents as compatible with OpenSearch (auto-detection targets
+# Elastic Cloud/Elasticsearch version strings, which OpenSearch's
+# `/`-response does not return the way Vector's "auto" prober expects).
+api_version = "v7"
+
+[sinks.opensearch.healthcheck]
+enabled = true
+
+# ===========================================================================
+# Findings pipeline: the Findings Engine output (the DIFFERENTIATION).
+# `findings-from-events` (server/ingest) reads the same events.ndjson, runs the
+# engine, and writes two more NDJSON files into this same bind-mounted ./ingest
+# dir: findings.ndjson (one scored, deduped Finding per line) and
+# remediation.ndjson (the fix-first queue — one RemediationItem per line, each
+# collapsing every finding that one action closes). These two pipelines ship
+# them to their own indices so the "Findings — fix-first" dashboard can rank
+# fixes by risk. Neither file needs to exist for the stack to start — Vector
+# just waits until they appear. Findings carry no envelope `time`, so we stamp
+# ingest time (when the finding was surfaced) for the dashboard's time filter.
+# ---------------------------------------------------------------------------
+[sources.findings]
+type = "file"
+include = ["/ingest/findings.ndjson"]
+read_from = "beginning"
+
+[transforms.parse_findings]
+type = "remap"
+inputs = ["findings"]
+source = '''
+. = parse_json!(.message)
+.time = to_unix_timestamp(now(), unit: "milliseconds")
+.@timestamp = from_unix_timestamp!(.time, unit: "milliseconds")
+'''
+
+[sinks.opensearch_findings]
+type = "elasticsearch"
+inputs = ["parse_findings"]
+endpoints = ["http://opensearch:9200"]
+mode = "bulk"
+bulk.index = "torda-findings-%Y.%m.%d"
+api_version = "v7"
+
+[sinks.opensearch_findings.healthcheck]
+enabled = true
+
+# ---------------------------------------------------------------------------
+# Remediation pipeline: the fix-first queue. We derive closes_count /
+# assets_count (the array lengths) at ingest so the queue table can show
+# "one fix closes N findings across M assets" as sortable numeric columns.
+# ---------------------------------------------------------------------------
+[sources.remediation]
+type = "file"
+include = ["/ingest/remediation.ndjson"]
+read_from = "beginning"
+
+[transforms.parse_remediation]
+type = "remap"
+inputs = ["remediation"]
+source = '''
+. = parse_json!(.message)
+.closes_count = length(array!(.closes))
+.assets_count = length(array!(.assets))
+.time = to_unix_timestamp(now(), unit: "milliseconds")
+.@timestamp = from_unix_timestamp!(.time, unit: "milliseconds")
+'''
+
+[sinks.opensearch_remediation]
+type = "elasticsearch"
+inputs = ["parse_remediation"]
+endpoints = ["http://opensearch:9200"]
+mode = "bulk"
+bulk.index = "torda-remediation-%Y.%m.%d"
+api_version = "v7"
+
+[sinks.opensearch_remediation.healthcheck]
+enabled = true
+
+# ---------------------------------------------------------------------------
+# Production / secured OpenSearch path (commented — the dev quickstart above
+# has DISABLE_SECURITY_PLUGIN=true, so no auth/TLS is required). Uncomment and
+# adapt when pointing at a real, secured OpenSearch cluster:
+# ---------------------------------------------------------------------------
+# [sinks.opensearch.auth]
+# strategy = "basic"
+# user = "admin"
+# password = "CHANGEME"    # put the real password here, or export it to the vector
+#                          # container and use Vector env-var interpolation (dollar-brace
+#                          # ENV refs). NOTE: Vector resolves such refs across the WHOLE
+#                          # config BEFORE parsing — even inside comments — so this sample
+#                          # ships a literal placeholder rather than an unset ENV ref that
+#                          # would otherwise stop Vector from starting.
+#
+# [sinks.opensearch.tls]
+# ca_file = "/etc/vector/ca.pem"
+# verify_certificate = true

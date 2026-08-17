@@ -1,0 +1,11 @@
+{"remediation_key":"triage-attack-chain","risk":68,"closes":["correlation:curl->203.0.113.7:4444"],"assets":["app-01","db-01","web-01","web-02"]}
+{"remediation_key":"upgrade:curl>=8.4.0","risk":61,"closes":["CVE-2023-38545"],"assets":["web-01","web-02"]}
+{"remediation_key":"upgrade:sudo>=1.8.31-1ubuntu1.2","risk":56,"closes":["CVE-2021-3156"],"assets":["db-01"]}
+{"remediation_key":"upgrade:sudo>=1.8.32","risk":56,"closes":["CVE-2021-3156"],"assets":["web-01"]}
+{"remediation_key":"upgrade:openssl>=3.0.2-0ubuntu1.7","risk":52,"closes":["CVE-2022-3602","CVE-2022-3786"],"assets":["db-01"]}
+{"remediation_key":"upgrade:openssl>=3.0.7","risk":52,"closes":["CVE-2022-3602","CVE-2022-3786"],"assets":["web-01","web-02"]}
+{"remediation_key":"upgrade:zlib1g>=1.2.12","risk":38,"closes":["CVE-2018-25032"],"assets":["web-01"]}
+{"remediation_key":"upgrade:7-zip>=24.07","risk":30,"closes":["CVE-2024-11477"],"assets":["win-01"]}
+{"remediation_key":"upgrade:openvpn>=2.6.7","risk":29,"closes":["CVE-2023-46850"],"assets":["win-01"]}
+{"remediation_key":"upgrade:notepad++>=8.5.7","risk":23,"closes":["CVE-2023-40031"],"assets":["win-01"]}
+{"remediation_key":"upgrade:putty>=0.81","risk":18,"closes":["CVE-2024-31497"],"assets":["win-01"]}

@@ -1,0 +1,90 @@
+<?xml version="1.0" encoding="windows-1252"?>
+<!--
+  WiX source for the torda Windows installer (.msi), built by cargo-wix.
+  This is the standard cargo-wix single-binary template: it installs
+  torda.exe under "Program Files\torda\bin" and adds that dir to
+  the system PATH. The agent is Apache-2.0 (the FSL backend crates are not part of
+  this package).
+
+  Built in CI by .github/workflows/release.yml on a v* tag, via cargo-wix in
+  no-build mode against the pre-compiled torda.exe (built with the windows-etw
+  feature). The msi is UNSIGNED in CI; Authenticode signing is a maintainer step.
+
+  NOTE: WiX/cargo-wix are not available in the authoring environment, so this file
+  is validated on the first Windows release build. cargo-wix defines the vars used
+  below: Version, Platform, Profile, CargoTargetBinDir.
+-->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+    <Product
+        Id="*"
+        Name="torda"
+        UpgradeCode="A7B3E2F1-9C4D-4A6E-B8F0-1D2C3E4F5A6B"
+        Manufacturer="Qlucent Technologies Pvt Ltd"
+        Language="1033"
+        Codepage="1252"
+        Version="$(var.Version)">
+
+        <Package Id="*"
+            Keywords="Installer"
+            Description="OCSF-native endpoint security agent"
+            Manufacturer="Qlucent Technologies Pvt Ltd"
+            InstallerVersion="450"
+            Languages="1033"
+            Compressed="yes"
+            InstallScope="perMachine"
+            SummaryCodepage="1252"/>
+
+        <MajorUpgrade
+            Schedule="afterInstallInitialize"
+            DowngradeErrorMessage="A newer version of torda is already installed. Setup will now exit."/>
+
+        <Media Id="1" Cabinet="media1.cab" EmbedCab="yes" DiskPrompt="CD-ROM #1"/>
+        <Property Id="DiskPrompt" Value="torda Installation"/>
+
+        <Directory Id="TARGETDIR" Name="SourceDir">
+            <Directory Id="ProgramFiles64Folder" Name="PFiles">
+                <Directory Id="APPLICATIONFOLDER" Name="torda">
+                    <Directory Id="Bin" Name="bin">
+                        <Component Id="Path" Guid="B2C4D6E8-1A3B-4C5D-9E7F-2A4B6C8D0E1F" KeyPath="yes">
+                            <Environment
+                                Id="PATH"
+                                Name="PATH"
+                                Value="[Bin]"
+                                Permanent="no"
+                                Part="last"
+                                Action="set"
+                                System="yes"/>
+                        </Component>
+                        <Component Id="binary0" Guid="*">
+                            <File
+                                Id="exe0"
+                                Name="torda.exe"
+                                DiskId="1"
+                                Source="$(var.CargoTargetBinDir)\torda.exe"
+                                KeyPath="yes"/>
+                        </Component>
+                    </Directory>
+                </Directory>
+            </Directory>
+        </Directory>
+
+        <Feature
+            Id="Binaries"
+            Title="torda"
+            Description="Installs the torda binary and adds it to PATH."
+            Level="1"
+            ConfigurableDirectory="APPLICATIONFOLDER"
+            AllowAdvertise="no"
+            Display="expand"
+            Absent="disallow">
+            <ComponentRef Id="Path"/>
+            <ComponentRef Id="binary0"/>
+        </Feature>
+
+        <Property Id="ARPHELPLINK" Value="https://github.com/qlucent/torda"/>
+        <Property Id="WIXUI_INSTALLDIR" Value="APPLICATIONFOLDER"/>
+
+        <UIRef Id="WixUI_InstallDir"/>
+        <WixVariable Id="WixUILicenseRtf" Value="wix\License.rtf"/>
+    </Product>
+</Wix>

@@ -1,0 +1,12 @@
+# Build config for the kernel-side eBPF crate. A plain `cargo +nightly build`
+# from this directory targets BPF: `bpfel-unknown-none` with a `core`-only
+# build-std, and `--cfg bpf_target_arch` so aya-ebpf's arch-specific bindings
+# compile. bpf-linker (on $PATH) links the final object; no clang required.
+[build]
+target = "bpfel-unknown-none"
+
+[unstable]
+build-std = ["core"]
+
+[target.bpfel-unknown-none]
+rustflags = ["--cfg", "bpf_target_arch=\"x86_64\""]

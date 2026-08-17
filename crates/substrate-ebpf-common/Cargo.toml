@@ -1,0 +1,25 @@
+[package]
+name = "torda-substrate-ebpf-common"
+version = "0.0.1"
+edition = "2021"
+license = "Apache-2.0"
+# EXCLUDED from the workspace (see root Cargo.toml `[workspace] exclude`): this
+# `no_std` crate is shared by the kernel-side eBPF program (`torda-substrate-ebpf`)
+# and, in Task 2, the userspace `EbpfBus` loader. Because it is excluded, it
+# cannot inherit `[workspace.package]`, so edition/version/license are explicit.
+
+[lib]
+name = "torda_substrate_ebpf_common"
+path = "src/lib.rs"
+
+[features]
+default = []
+# `user` is turned on by the userspace (std) loader in Task 2 so it can treat
+# `ProcEvent` as plain-old-data when reading it out of the ring buffer. The
+# kernel-side eBPF program never enables it, so `aya` (a std crate) stays out of
+# the BPF build.
+user = ["aya"]
+
+[dependencies]
+# Optional + only pulled when the `user` feature is on (userspace loader).
+aya = { version = "0.14", optional = true }

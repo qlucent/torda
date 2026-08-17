@@ -1,0 +1,293 @@
+[package]
+name = "torda"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+description = "OCSF-native endpoint security agent: one shared eBPF/ETW probe set feeding thin detection modules, with cross-sensor attack-chain correlation and fix-first vulnerability findings."
+repository.workspace = true
+# With a second [[bin]] (agent-e2e-demo) present, keep `cargo run -p torda` resolving
+# to the agent binary exactly as before.
+default-run = "torda"
+
+[features]
+default = []
+# Forwards to the substrate's real ETW event bus (Windows only). Off by default
+# so the standard build never pulls ferrisetw; a non-elevated run fails soft to
+# the stub bus.
+windows-etw = ["torda-substrate/windows-etw"]
+# Forwards to the substrate's real eBPF event bus (Linux only). Off by default so
+# the standard build never pulls aya / builds a BPF object; a non-root run fails
+# soft to the stub bus.
+linux-ebpf = ["torda-substrate/linux-ebpf"]
+
+[lib]
+name = "torda"
+path = "src/lib.rs"
+
+[[bin]]
+name = "torda"
+path = "src/main.rs"
+
+# P3c-1 LIVE end-to-end checkpoint: one process = OCSF telemetry + mTLS control channel.
+[[bin]]
+name = "agent-e2e-demo"
+path = "src/bin/agent-e2e-demo.rs"
+
+# P3d-2 ETW proof demo: run elevated with `--features windows-etw` to capture real
+# Windows process events; non-elevated it reports the stub fallback and exits 0.
+[[bin]]
+name = "etw-demo"
+path = "src/bin/etw-demo.rs"
+
+# P3d-3 eBPF proof demo: build+run as ROOT in WSL with `--features linux-ebpf` to
+# capture real Linux process events; non-root it reports the stub fallback and exits 0.
+[[bin]]
+name = "ebpf-demo"
+path = "src/bin/ebpf-demo.rs"
+
+# Task 2 (p3d6-etw-network-events): live ETW network demo — subscribes NetConnect,
+# binds a local 127.0.0.1:0 listener + connects to it a few times (no external
+# dependency), and self-asserts a captured connect to that listener as ADMINISTRATOR
+# with `--features windows-etw`; non-elevated it reports the stub fallback and exits 0.
+[[bin]]
+name = "net-etw-demo"
+path = "src/bin/net-etw-demo.rs"
+
+# Task 2 (p3d7-etw-file-events): live ETW file demo — subscribes FileOpen,
+# writes a unique probe file under the temp dir a few times (no external
+# dependency), and self-asserts a captured FileOpen whose path ends with the
+# probe file's name as ADMINISTRATOR with `--features windows-etw`; non-elevated
+# it reports the stub fallback and exits 0.
+[[bin]]
+name = "file-etw-demo"
+path = "src/bin/file-etw-demo.rs"
+
+# Task 3 (p3d11-etw-byte-level-filewrite): live ETW byte-level FileWrite demo —
+# subscribes FileWrite, writes a large known payload to a unique probe file
+# under the temp dir a few times (no external dependency), and self-asserts a
+# captured FileWrite whose path ends with the probe file's name AND whose
+# `bytes` field is > 0 (proving the Write event id 16 + FileObject->path
+# correlation cache, not just the Create-event write-intent signal) as
+# ADMINISTRATOR with `--features windows-etw`; non-elevated it reports the
+# stub fallback and exits 0.
+[[bin]]
+name = "filewrite-etw-demo"
+path = "src/bin/filewrite-etw-demo.rs"
+
+# Task 2 (p3d5-ebpf-network-events): live network demo — subscribes NetConnect,
+# binds a local 127.0.0.1:0 listener + connects to it a few times (no external
+# dependency), and self-asserts a captured connect to that listener as ROOT in
+# WSL with `--features linux-ebpf`; non-root it reports the stub fallback and
+# exits 0.
+[[bin]]
+name = "net-demo"
+path = "src/bin/net-demo.rs"
+
+# P3e-1 procmon detection demo: builds a StubBus + a real ProcMonModule + a capturing
+# emitter, publishes synthetic ProcessExec events, and prints the emitted OCSF Process
+# Activity — benign vs flagged — proving the subscribe->assess->emit path with no backend.
+[[bin]]
+name = "procmon-demo"
+path = "src/bin/procmon-demo.rs"
+
+# P3e-1 LIVE eBPF detection demo: combines the REAL eBPF EventBus (--features linux-ebpf,
+# ROOT) with procmon's `assess` ruleset — real Linux execs -> detections. Non-root it
+# reports the stub fallback and exits 0; as root it captures real events and self-asserts
+# a flagged detection.
+[[bin]]
+name = "procmon-ebpf-demo"
+path = "src/bin/procmon-ebpf-demo.rs"
+
+# P3e-2 LIVE eBPF correlation demo: runs the REAL ProcMonModule (subscribes to
+# ProcessExec + ProcessExit, correlates by pid) against the REAL eBPF EventBus
+# (--features linux-ebpf, ROOT) and self-asserts a correlated numeric
+# lifetime_ms AND a short_lived_suspicious detection on a real exit. Non-root
+# it reports the stub fallback and exits 0.
+[[bin]]
+name = "procmon-lifecycle-ebpf-demo"
+path = "src/bin/procmon-lifecycle-ebpf-demo.rs"
+
+# Task 2 (p3f1-network-detection): netmon StubBus detection demo — builds a StubBus
+# + a real NetMonModule + a capturing emitter, publishes synthetic NetConnect events,
+# and prints the emitted OCSF Network Activity — benign vs flagged — proving the
+# subscribe->assess->emit path with no backend.
+[[bin]]
+name = "netmon-demo"
+path = "src/bin/netmon-demo.rs"
+
+# Task 3 (p3f1-network-detection): LIVE eBPF network-detection demo — combines the
+# REAL eBPF EventBus (--features linux-ebpf, ROOT) with the REAL NetMonModule: a
+# benign loopback connect plus a planted suspicious-external connect_timeout to
+# 203.0.113.1:4444 (TEST-NET-3), self-asserting the planted connect is captured
+# over the real bus AND flagged suspicious_port(_to_external). Non-root it reports
+# the stub fallback and exits 0.
+[[bin]]
+name = "netmon-ebpf-demo"
+path = "src/bin/netmon-ebpf-demo.rs"
+
+# Task 2 (p3g1-process-network-correlation): corr StubBus attack-chain demo —
+# builds a StubBus + a real CorrModule + a capturing emitter, publishes a
+# synthetic exec->connect attack-chain sequence plus benign contrasts, and
+# prints the emitted OCSF Correlated Activity (9002) records — flagged vs
+# non-correlated — proving the subscribe->correlate->emit path with no backend.
+[[bin]]
+name = "corr-demo"
+path = "src/bin/corr-demo.rs"
+
+# Task 3 (p3g1-process-network-correlation): LIVE eBPF cross-sensor correlation
+# demo — runs the REAL CorrModule (subscribes to ProcessExec + ProcessExit +
+# NetConnect) against the REAL eBPF EventBus (--features linux-ebpf, ROOT),
+# spawns curl (a LOLBin) against a suspicious external address several times,
+# and self-asserts a real `suspicious_process_suspicious_connection` attack-chain
+# correlation. Non-root it reports the stub fallback and exits 0.
+[[bin]]
+name = "corr-ebpf-demo"
+path = "src/bin/corr-ebpf-demo.rs"
+
+# Task 2 (p3g4-file-process-correlation): LIVE cross-sensor FILE correlation
+# demo — runs the REAL CorrModule (subscribes to ProcessExec + ProcessExit +
+# NetConnect + FileWrite) against the real live event bus (--features
+# linux-ebpf ROOT, or --features windows-etw ADMINISTRATOR), spawns curl (a
+# LOLBin) with `-o <probe path>` several times so the SAME curl pid both execs
+# suspiciously and writes to a watched probe path, and self-asserts a real
+# `suspicious_process_suspicious_file_write` attack-chain correlation
+# attributed to the curl exec. Non-elevated it reports the stub fallback and
+# exits 0.
+[[bin]]
+name = "corr-file-demo"
+path = "src/bin/corr-file-demo.rs"
+
+# Task 2 (p3g5-triple-chain-correlation): LIVE triple-chain (dropper-then-C2)
+# demo — runs the REAL CorrModule against the real live event bus (--features
+# linux-ebpf ROOT, or --features windows-etw ADMINISTRATOR). A bounded loopback
+# HTTP responder listens on 127.0.0.1:4444 (a netmon SUSPICIOUS_PORT); one curl
+# per attempt does BOTH halves — connects to :4444 (suspicious connect) AND `-o`
+# writes the response body into a watched probe path under HOME (suspicious
+# write) — so the SAME curl pid fires the connect rule, the file rule, AND the
+# TRIPLE `suspicious_process_wrote_file_and_connected`. It self-asserts the
+# attributed TRIPLE for the probe+port. Non-elevated it reports the stub
+# fallback and exits 0.
+[[bin]]
+name = "corr-triple-demo"
+path = "src/bin/corr-triple-demo.rs"
+
+# Task 3 (p3g6-exfil-chain): LIVE exfil-chain (read-sensitive-then-C2) demo —
+# runs the REAL CorrModule against the real live event bus (--features
+# linux-ebpf ROOT, or --features windows-etw ADMINISTRATOR). A bounded loopback
+# HTTP responder listens on 127.0.0.1:4444 (a netmon SUSPICIOUS_PORT); one curl
+# per attempt does BOTH halves — `-T` reads a pre-created sensitive-named probe
+# path under HOME (suspicious read) AND connects to :4444 (suspicious connect)
+# — so the SAME curl pid fires the connect rule AND the EXFIL
+# `suspicious_process_read_sensitive_and_connected` chain. It self-asserts the
+# attributed EXFIL record for the probe+port. Non-elevated it reports the stub
+# fallback and exits 0.
+[[bin]]
+name = "corr-exfil-demo"
+path = "src/bin/corr-exfil-demo.rs"
+
+# Task 2 (p3d8-ebpf-file-events): live eBPF file demo — subscribes FileOpen,
+# writes a unique probe file under the temp dir a few times (no external
+# dependency), and self-asserts a captured FileOpen whose path ends with the
+# probe file's name as ROOT in WSL with `--features linux-ebpf`; non-root it
+# reports the stub fallback and exits 0.
+[[bin]]
+name = "file-ebpf-demo"
+path = "src/bin/file-ebpf-demo.rs"
+
+# Task 3 (p3i1-fim-detection-module): LIVE file-detection demo — combines the
+# REAL event bus (--features linux-ebpf ROOT, or --features windows-etw
+# ADMINISTRATOR) with the REAL FileMonModule: a planted sensitive/system-dir
+# write (via a custom policy so temp-housed probe paths whose text CONTAINS
+# the rule substring survive the prefilter) is flagged HIGH severity with the
+# expected rule, while a same-tail write under a `torda-ignored` marker directory
+# produces ZERO envelopes, proving ignore beats watch through the real module.
+# Non-elevated it reports the stub fallback and exits 0.
+[[bin]]
+name = "filemon-demo"
+path = "src/bin/filemon-demo.rs"
+
+[dependencies]
+anyhow.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+torda-core = { path = "../core" }
+torda-ocsf = { path = "../ocsf" }
+torda-substrate = { path = "../substrate" }
+torda-mod-asset = { path = "../modules/asset" }
+torda-mod-health = { path = "../modules/health" }
+torda-mod-vuln = { path = "../modules/vuln" }
+torda-mod-compliance = { path = "../modules/compliance" }
+torda-mod-drift = { path = "../modules/drift" }
+torda-mod-fim = { path = "../modules/fim" }
+torda-mod-procmon = { path = "../modules/procmon" }
+torda-mod-netmon = { path = "../modules/netmon" }
+torda-mod-filemon = { path = "../modules/filemon" }
+torda-mod-corr = { path = "../modules/corr" }
+# P3c-1: the secure control service wiring (all first-party crates).
+torda-control-plane = { path = "../../server/control-plane" }
+torda-transport-tls = { path = "../../server/transport-tls" }
+torda-remediation = { path = "../../server/remediation" }
+torda-transport = { path = "../../server/transport" }
+sysinfo = { workspace = true }
+# P3c-1 agent-e2e-demo (a [[bin]] cannot use dev-deps): hex key/pubkey files + rustls
+# ServerName for the client-side mTLS handshake. Both already used by the control_e2e test.
+hex = { workspace = true }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+
+[dev-dependencies]
+# control_e2e integration test: an mTLS client + issuer over real ed25519.
+torda-control-plane = { path = "../../server/control-plane" }
+torda-transport-tls = { path = "../../server/transport-tls" }
+torda-remediation = { path = "../../server/remediation" }
+hex = { workspace = true }
+# For ServerName + the client leaf DER passed to `connect`; matches the transport-tls
+# feature set (ring provider).
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+
+# --- Packaging -------------------------------------------------------------
+# The agent is Apache-2.0 (license.workspace). `.deb`/`.rpm`/`.msi` are built by
+# .github/workflows/release.yml on a v* tag. In CI the platform binary is built
+# first (e.g. `--features linux-ebpf`) and then packaged with `--no-build`, so the
+# package wraps whatever variant was compiled. Packages are UNSIGNED in CI —
+# signing (GPG for deb/rpm, Authenticode for msi) is a maintainer step with their
+# own keys. The config is a conffile (never clobbered on
+# upgrade); the unit is installed but NOT auto-enabled.
+
+[package.metadata.deb]
+maintainer = "Pavan Kumar Karanam <pavank@qlucent.com>"
+copyright = "2026, Qlucent Technologies Pvt Ltd"
+extended-description = """
+One lightweight, OCSF-native endpoint security agent. A single shared probe set \
+(eBPF on Linux, ETW on Windows) feeds thin detection modules that emit OCSF, with \
+cross-sensor attack-chain correlation and fix-first vulnerability findings. The \
+agent makes no network call of its own — it writes OCSF NDJSON that a log shipper \
+carries into your own SIEM."""
+section = "admin"
+priority = "optional"
+depends = "$auto"
+# Non-binary asset sources are resolved relative to this manifest's dir
+# (crates/agent); the real files live at the repo root, hence `../../`. The
+# `target/` binary is special-cased by cargo-deb to the workspace target dir.
+assets = [
+  ["target/release/torda", "usr/bin/", "755"],
+  ["../../deploy/packaging/torda.service", "lib/systemd/system/torda.service", "644"],
+  ["../../deploy/torda.toml", "etc/torda/config.toml", "644"],
+  ["../../LICENSE", "usr/share/doc/torda/LICENSE", "644"],
+  ["../../LICENSING.md", "usr/share/doc/torda/LICENSING.md", "644"],
+  ["../../README.md", "usr/share/doc/torda/README.md", "644"],
+]
+conf-files = ["/etc/torda/config.toml"]
+
+[package.metadata.generate-rpm]
+summary = "OCSF-native endpoint security agent (shared eBPF/ETW probes, fix-first findings)"
+# The RPM ships the Apache-2.0 agent; the FSL backend crates are not part of it.
+assets = [
+  { source = "target/release/torda", dest = "/usr/bin/torda", mode = "755" },
+  { source = "../../deploy/packaging/torda.service", dest = "/usr/lib/systemd/system/torda.service", mode = "644" },
+  { source = "../../deploy/torda.toml", dest = "/etc/torda/config.toml", mode = "644", config = true },
+  { source = "../../LICENSE", dest = "/usr/share/licenses/torda/LICENSE", mode = "644", doc = true },
+  { source = "../../LICENSING.md", dest = "/usr/share/doc/torda/LICENSING.md", mode = "644", doc = true },
+  { source = "../../README.md", dest = "/usr/share/doc/torda/README.md", mode = "644", doc = true },
+]

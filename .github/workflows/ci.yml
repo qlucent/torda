@@ -1,0 +1,55 @@
+name: CI
+
+# Gates the DEFAULT (stub-substrate) build only: fmt, clippy, build, test.
+#
+# Deferred: CI legs for `--features
+# linux-ebpf` / `--features windows-etw`. Those need a nightly toolchain +
+# bpf-linker (linux-ebpf) or an elevated/Administrator runner (windows-etw)
+# to actually exercise the kernel-probe path, which is out of scope for this
+# workflow. The default build below never pulls aya/ferrisetw and needs
+# neither privilege nor a special toolchain.
+
+on:
+  push:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-test:
+    name: fmt + clippy + build + test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        include:
+          # Nice-to-have leg: the default (stub-substrate) build on Windows.
+          - os: windows-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install stable Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry and build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: . -> target
+
+      - name: cargo fmt --check
+        run: cargo fmt --all --check
+
+      - name: cargo clippy (deny warnings)
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: cargo build --workspace
+        run: cargo build --workspace
+
+      - name: cargo test --workspace
+        run: cargo test --workspace

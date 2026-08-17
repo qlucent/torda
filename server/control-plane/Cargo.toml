@@ -1,0 +1,18 @@
+[package]
+name = "torda-control-plane"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[lib]
+name = "torda_control_plane"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+ed25519-dalek = { workspace = true }
+hex = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+torda-remediation = { path = "../remediation" }
+torda-transport = { path = "../transport" }

@@ -1,0 +1,48 @@
+[package]
+name = "torda-substrate"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[lib]
+name = "torda_substrate"
+path = "src/lib.rs"
+
+[features]
+default = []
+# Real eBPF (aya) collection lands behind this flag in P1. The host build
+# stays green without a bpf toolchain by defaulting to the stub bus. Turning it
+# on (Linux only) pulls in the userspace `aya` loader + the shared wire-struct
+# crate (with its `user`/`aya::Pod` feature) AND makes build.rs compile the
+# kernel-side `substrate-ebpf` crate to a BPF object. `dep:` keeps both purely
+# feature-activated so the default/cross-platform build never resolves them.
+linux-ebpf = ["dep:aya", "dep:torda-substrate-ebpf-common"]
+# Real ETW (ferrisetw) event collection on Windows. Off by default so the
+# cross-platform build never pulls ferrisetw; a non-elevated run fails soft to
+# the stub bus. `dep:ferrisetw` keeps the dependency purely feature-activated.
+windows-etw = ["dep:ferrisetw"]
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+torda-core = { path = "../core" }
+torda-ocsf = { path = "../ocsf" }
+
+# ETW backend deps are Windows-only AND feature-gated: the default and
+# cross-platform builds never resolve ferrisetw.
+[target.'cfg(windows)'.dependencies]
+ferrisetw = { version = "1.2", optional = true }
+
+# The aya userspace loader is Linux-only AND feature-gated (`dep:aya` via
+# `linux-ebpf`): the default and cross-platform builds never resolve aya. The
+# EbpfBus that uses it lands in Task 2; this task just wires the gating so the
+# feature resolves and the kernel object gets built.
+[target.'cfg(target_os = "linux")'.dependencies]
+aya = { version = "0.14", optional = true }
+# The shared `#[repr(C)]` wire struct (`ProcEvent`), single source of truth
+# for the ring-buffer layout. The `user` feature adds the `aya::Pod` impl for the
+# userspace loader. Excluded from the workspace, so pulled in by path; Linux-only
+# and feature-gated (`dep:` via `linux-ebpf`) so the default build never sees it.
+torda-substrate-ebpf-common = { path = "../substrate-ebpf-common", features = ["user"], optional = true }

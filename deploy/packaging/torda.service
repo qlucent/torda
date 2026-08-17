@@ -1,0 +1,34 @@
+# systemd unit installed by the .deb / .rpm package (see crates/agent/Cargo.toml
+# [package.metadata.deb] / [package.metadata.generate-rpm]). Same as
+# deploy/torda.service but ExecStart points at the packaged binary
+# location (/usr/bin) instead of the manual-install /usr/local/bin.
+#
+# The package does NOT enable this unit automatically. After install:
+#   sudoedit /etc/torda/config.toml     # set daemon mode + output path
+#   sudo systemctl enable --now torda
+#
+# NOTE: the packaged binary is the DEFAULT (stub) build unless you installed the
+# eBPF/ETW package variant. eBPF collection needs root or CAP_BPF+CAP_PERFMON;
+# without the platform feature or the privilege the agent fails soft to the stub
+# bus (see docs/DEPLOY.md).
+
+[Unit]
+Description=torda — unified security agent (daemon mode, OCSF file sink)
+Documentation=https://github.com/qlucent/torda
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/bin/torda --config /etc/torda/config.toml
+Restart=on-failure
+RestartSec=5s
+
+# Optional hardening (loosen if it conflicts with your eBPF/CAP_BPF setup):
+NoNewPrivileges=false
+ProtectSystem=full
+ReadWritePaths=/var/log/torda
+
+[Install]
+WantedBy=multi-user.target

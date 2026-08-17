@@ -1,0 +1,21 @@
+{
+  "index_patterns": ["torda-remediation-*"],
+  "template": {
+    "settings": {
+      "number_of_shards": 1,
+      "number_of_replicas": 0
+    },
+    "mappings": {
+      "dynamic": true,
+      "properties": {
+        "time": { "type": "date", "format": "epoch_millis" },
+        "remediation_key": { "type": "keyword" },
+        "risk": { "type": "integer" },
+        "closes": { "type": "keyword" },
+        "assets": { "type": "keyword" },
+        "closes_count": { "type": "integer" },
+        "assets_count": { "type": "integer" }
+      }
+    }
+  }
+}

@@ -1,0 +1,48 @@
+# Sample torda configuration (TOML). Point the agent at it with:
+#   torda --config /etc/torda/config.toml
+#
+# CLI flags and env vars OVERRIDE any value here — precedence is:
+#   flag  >  env var  >  this config file  >  built-in default
+# so you can ship one config and still override per-host at launch
+# (e.g. `--output /other/path` beats `[output].path` below).
+#
+# Every section is optional. With no config and no flags the agent runs one
+# collection cycle to stdout and exits (the classic default).
+
+[agent]
+# Run continuously — stream events until a shutdown signal (ctrl-c / SIGINT,
+# or $TORDA_RUN_SECS=<n> for a bounded run) — instead of a single cycle.
+# (Same as passing --daemon.)
+daemon = true
+
+[output]
+# "file"  → write rotating OCSF NDJSON to `path` (a log shipper tails it).
+# "stdout" (the default) → print NDJSON to stdout.
+sink = "file"
+path = "/var/log/torda/events.ndjson"
+# Roll the active file once it exceeds this many megabytes (keeps a few rolled
+# files: events.ndjson.1, .2, ...). Default 64.
+rotate_mb = 64
+
+# ---------------------------------------------------------------------------
+# Optional mTLS remediation control channel. OFF unless this block is present
+# AND `enabled = true`. Leave it commented for a collection-only agent (the
+# common case). Remediation is a bridge, never
+# a decider — the default executor is a strict dry-run.
+# ---------------------------------------------------------------------------
+# [control]
+# enabled = true
+# control_addr = "127.0.0.1:9443"
+# tenant_id = "tenant-prod"
+# trust_dir = "/etc/torda/trust"        # dir of trusted signer public keys
+# agent_key_file = "/etc/torda/agent.key"
+#
+# [control.cert]                                # the listener's mTLS material
+# ca_paths = ["/etc/torda/ca.pem"]
+# cert_chain = "/etc/torda/agent-chain.pem"
+# key = "/etc/torda/agent.key"
+# crl_paths = []
+#
+# [[control.roles]]                             # actor -> role authorization
+# actor = "ops-lead"
+# role = "approver"                             # operator | approver | responder | admin

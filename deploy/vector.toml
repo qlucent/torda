@@ -1,0 +1,27 @@
+# Minimal Vector config: tails torda's OCSF NDJSON file sink and prints
+# it to the console for quick verification. See docs/DEPLOY.md for the full
+# "run -> file -> shipper -> SIEM" path; flip the commented sink below to send
+# to a real OpenSearch/ELK cluster instead of (or in addition to) the console.
+
+[sources.ua]
+type = "file"
+include = ["/var/log/torda/events.ndjson"]
+read_from = "beginning"
+
+[sinks.console]
+type = "console"
+inputs = ["ua"]
+encoding.codec = "json"
+
+# One-line switch to ship to a real OpenSearch/ELK endpoint instead of (or
+# alongside) the console sink above — uncomment and point `endpoints` at your
+# cluster. `bulk.index` groups events by day; adjust to taste.
+# [sinks.opensearch]
+# type = "elasticsearch"
+# inputs = ["ua"]
+# endpoints = ["https://opensearch.example.internal:9200"]
+# bulk.index = "torda-ocsf-%Y.%m.%d"
+# auth.strategy = "basic"
+# auth.user = "vector_writer"
+# auth.password = "${OPENSEARCH_PASSWORD}"
+# tls.verify_certificate = true

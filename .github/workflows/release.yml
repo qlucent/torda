@@ -1,0 +1,165 @@
+name: Release
+
+# Builds prebuilt binaries AND install packages (.deb / .rpm / .msi), then attaches
+# them to a GitHub Release when a `v*` tag is pushed
+# (e.g. `git tag v0.1.0 && git push origin v0.1.0`). Inert until the repo has a
+# GitHub remote and you push a tag.
+#
+# LICENSE: the agent (this binary + everything it links) is Apache-2.0; the FSL
+# backend crates (findings-engine, ingest) are NOT part of these packages. See
+# LICENSING.md.
+#
+# The useful Linux build compiles the real eBPF backend (`--features linux-ebpf`):
+# the substrate build.rs runs `cargo +nightly build` and links with bpf-linker, and
+# that nested build needs the `rust-src` component (build-std). The Windows build
+# compiles the ETW backend (`--features windows-etw`, ferrisetw — stable, no
+# nightly). Loading eBPF/ETW at runtime still needs root / Administrator.
+#
+# Packages are UNSIGNED here. Signing (GPG for deb/rpm, Authenticode for msi) is a
+# maintainer step with your own keys.
+#
+# NOTE: cargo-deb / cargo-generate-rpm / cargo-wix are not available in the authoring
+# environment, so the packaging steps are validated on the first tagged build. If a
+# Linux package step can't find an asset, the asset paths in
+# crates/agent/Cargo.toml ([package.metadata.deb] / [.generate-rpm]) are resolved
+# relative to the working directory these steps run in (the repo root).
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write   # create the Release and upload assets
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  linux:
+    name: Linux x86_64 (binaries + deb + rpm)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      # Host toolchain (stable) builds the agent; the eBPF build.rs shells out to
+      # `cargo +nightly`, and the kernel crate's build-std = ["core"] needs rust-src.
+      - name: Install Rust toolchains (stable + nightly + rust-src)
+        run: |
+          rustup toolchain install stable --profile minimal --no-self-update
+          rustup toolchain install nightly --profile minimal --component rust-src --no-self-update
+          rustup default stable
+
+      # Install bpf-linker from its PREBUILT release binary (bundles LLVM) rather
+      # than `cargo install` — upstream explicitly does not recommend building it
+      # from source (llvm-sys pins a specific, often-unreleased LLVM; that source
+      # build is what failed CI). binstall fetches the *-unknown-linux-musl binary.
+      - name: Install cargo-binstall
+        uses: cargo-bins/cargo-binstall@main
+      - name: Install bpf-linker (prebuilt)
+        run: cargo binstall -y bpf-linker
+
+      - name: Install packaging tools
+        run: cargo install cargo-deb cargo-generate-rpm --locked
+
+      - name: Cache cargo registry and build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: . -> target
+
+      - name: Build agent (release, eBPF backend)
+        run: cargo build --release --features linux-ebpf --bin torda
+
+      - name: Stage eBPF binary
+        run: |
+          mkdir -p dist
+          cp target/release/torda dist/torda-linux-x86_64-ebpf
+
+      # Package the eBPF binary now, BEFORE the default build overwrites
+      # target/release/torda. Both tools read crates/agent/Cargo.toml's
+      # packaging metadata and package the already-built binary (--no-build for deb).
+      - name: Build .deb (cargo-deb)
+        run: cargo deb -p torda --no-build --no-strip -o dist/
+
+      - name: Build .rpm (cargo-generate-rpm)
+        run: |
+          cargo generate-rpm -p crates/agent
+          cp target/generate-rpm/*.rpm dist/
+
+      - name: Build agent (release, default/stub backend)
+        run: cargo build --release --bin torda
+
+      - name: Stage default binary
+        run: cp target/release/torda dist/torda-linux-x86_64
+
+      - name: Checksums
+        run: (cd dist && sha256sum torda-* *.deb *.rpm > SHA256SUMS-linux.txt)
+
+      - name: Upload Linux artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-x86_64
+          path: dist/*
+
+  windows:
+    name: Windows x86_64 (binary + msi)
+    runs-on: windows-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      # ETW (ferrisetw) is stable Rust — no nightly needed.
+      - name: Install Rust (stable)
+        run: rustup toolchain install stable --profile minimal --no-self-update
+
+      - name: Install cargo-wix
+        run: cargo install cargo-wix --locked
+
+      - name: Cache cargo registry and build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: . -> target
+
+      - name: Build agent (release, ETW backend)
+        run: cargo build --release --features windows-etw --bin torda
+
+      - name: Stage binary
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp target/release/torda.exe dist/torda-windows-x86_64-etw.exe
+
+      # Packages the already-built target/release/torda.exe per wix/main.wxs.
+      # Run from the package dir so cargo-wix auto-discovers crates/agent/wix/main.wxs
+      # and the wxs's `wix\License.rtf` path resolves; output to the repo-root dist/.
+      - name: Build .msi (cargo-wix)
+        shell: bash
+        working-directory: crates/agent
+        run: cargo wix --package torda --no-build --nocapture --output "$GITHUB_WORKSPACE/dist/torda-x86_64.msi"
+
+      - name: Checksums
+        shell: bash
+        run: (cd dist && sha256sum torda-*.exe *.msi > SHA256SUMS-windows.txt)
+
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-x86_64
+          path: dist/*
+
+  release:
+    name: Publish GitHub Release
+    needs: [linux, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download built artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create release and attach binaries + packages
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/**/*
+          generate_release_notes: true
+          fail_on_unmatched_files: true

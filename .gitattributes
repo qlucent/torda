@@ -1,0 +1,4 @@
+# Normalize line endings so shell scripts stay LF on every platform — a demo.sh
+# checked out with CRLF fails on Linux with "bad interpreter".
+* text=auto
+*.sh text eol=lf

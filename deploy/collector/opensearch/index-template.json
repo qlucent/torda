@@ -1,0 +1,85 @@
+{
+  "index_patterns": ["torda-ocsf-*"],
+  "template": {
+    "settings": {
+      "number_of_shards": 1,
+      "number_of_replicas": 0
+    },
+    "mappings": {
+      "dynamic": true,
+      "properties": {
+        "time": { "type": "date", "format": "epoch_millis" },
+        "class_uid": { "type": "integer" },
+        "class_name": { "type": "keyword" },
+        "severity_id": { "type": "integer" },
+        "metadata": {
+          "properties": {
+            "product": { "type": "keyword" },
+            "version": { "type": "keyword" },
+            "tenant_id": { "type": "keyword" }
+          }
+        },
+        "device": {
+          "properties": {
+            "hostname": { "type": "keyword" },
+            "os": { "type": "keyword" },
+            "os_version": { "type": "keyword" }
+          }
+        },
+        "data": {
+          "dynamic": true,
+          "properties": {
+            "activity": { "type": "keyword" },
+            "process": {
+              "properties": {
+                "pid": { "type": "long" },
+                "image": { "type": "keyword" },
+                "attributed": { "type": "boolean" }
+              }
+            },
+            "connection": {
+              "properties": {
+                "daddr": { "type": "keyword" },
+                "dport": { "type": "integer" },
+                "proto": { "type": "keyword" }
+              }
+            },
+            "file": {
+              "properties": {
+                "path": { "type": "keyword" },
+                "op": { "type": "keyword" }
+              }
+            },
+            "detections": {
+              "properties": {
+                "rule": { "type": "keyword" }
+              }
+            },
+            "cpu_pct": { "type": "float" },
+            "mem_pct": { "type": "float" },
+            "uptime_ms": { "type": "long" },
+            "over_budget": { "type": "boolean" },
+            "compliance": {
+              "properties": {
+                "control": { "type": "keyword" },
+                "status": { "type": "keyword" }
+              }
+            },
+            "fim": {
+              "properties": {
+                "path": { "type": "keyword" },
+                "change": { "type": "keyword" }
+              }
+            },
+            "drift": {
+              "properties": {
+                "subject": { "type": "keyword" },
+                "drifted": { "type": "boolean" }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

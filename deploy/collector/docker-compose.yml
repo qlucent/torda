@@ -1,0 +1,72 @@
+# Collector bundle for the torda OCSF file sink: OpenSearch +
+# OpenSearch Dashboards + Vector. `docker compose up -d` stands up the
+# VIEWING side; the agent itself stays on the host (it needs eBPF/ETW
+# privilege) and writes OCSF NDJSON to a file that gets bind-mounted into
+# `vector` below. DEV-ONLY: the OpenSearch security plugin is disabled
+# (no TLS, no auth) — do not expose these ports beyond localhost. See
+# deploy/collector/README.md (Task 2) for the full quickstart + a
+# production-secure profile note.
+services:
+  opensearch:
+    image: opensearchproject/opensearch:2.17.1
+    container_name: torda-collector-opensearch
+    environment:
+      - discovery.type=single-node
+      - OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m
+      - DISABLE_INSTALL_DEMO_CONFIG=true
+      # DEV-ONLY quickstart: no TLS, no auth. Never do this outside a local
+      # / isolated demo environment.
+      - DISABLE_SECURITY_PLUGIN=true
+      - bootstrap.memory_lock=true
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    ports:
+      # Bind to localhost ONLY — this OpenSearch has no auth/TLS (dev quickstart),
+      # so it must never be reachable beyond this host. Change deliberately if you
+      # front it with a secured reverse proxy.
+      - "127.0.0.1:9200:9200"
+    volumes:
+      - opensearch-data:/usr/share/opensearch/data
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "curl -s -f http://localhost:9200/_cluster/health || exit 1",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+
+  opensearch-dashboards:
+    image: opensearchproject/opensearch-dashboards:2.17.1
+    container_name: torda-collector-dashboards
+    environment:
+      - OPENSEARCH_HOSTS=["http://opensearch:9200"]
+      # DEV-ONLY: matches the security-disabled OpenSearch node above.
+      - DISABLE_SECURITY_DASHBOARDS_PLUGIN=true
+    ports:
+      # Localhost ONLY (security plugin disabled — see the opensearch note above).
+      - "127.0.0.1:5601:5601"
+    depends_on:
+      opensearch:
+        condition: service_healthy
+
+  vector:
+    image: timberio/vector:0.41.1-alpine
+    container_name: torda-collector-vector
+    volumes:
+      - ./vector.toml:/etc/vector/vector.toml:ro
+      - ./ingest:/ingest:ro
+    command: ["--config", "/etc/vector/vector.toml"]
+    depends_on:
+      opensearch:
+        condition: service_healthy
+
+volumes:
+  opensearch-data:

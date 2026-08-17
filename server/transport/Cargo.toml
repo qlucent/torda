@@ -1,0 +1,11 @@
+[package]
+name = "torda-transport"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[lib]
+name = "torda_transport"
+path = "src/lib.rs"
+
+[dependencies]
