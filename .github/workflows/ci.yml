@@ -64,6 +64,10 @@ jobs:
       - name: Install cargo-binstall
         uses: cargo-bins/cargo-binstall@main
       - name: Install bpf-linker (prebuilt)
+        env:
+          # Authenticated GitHub API (5000/hr) so binstall's release lookup
+          # doesn't hit the 60/hr unauthenticated rate limit.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: cargo binstall -y bpf-linker
       - uses: Swatinem/rust-cache@v2
         with:
