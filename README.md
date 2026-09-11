@@ -1,5 +1,9 @@
 # Torda
 
+[![CI](https://github.com/qlucent/torda/actions/workflows/ci.yml/badge.svg)](https://github.com/qlucent/torda/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/qlucent/torda)](https://github.com/qlucent/torda/releases/latest)
+[![Agent license: Apache-2.0](https://img.shields.io/badge/agent-Apache--2.0-blue)](LICENSE)
+
 > An open-source, **OCSF-native endpoint security agent**. One shared kernel
 > probe set — **eBPF on Linux, ETW on Windows** — feeds thin detection modules
 > that emit OCSF, with cross-sensor **attack-chain correlation**, streamed to a
