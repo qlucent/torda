@@ -15,8 +15,12 @@ name: Release
 # compiles the ETW backend (`--features windows-etw`, ferrisetw — stable, no
 # nightly). Loading eBPF/ETW at runtime still needs root / Administrator.
 #
-# Packages are UNSIGNED here. Signing (GPG for deb/rpm, Authenticode for msi) is a
-# maintainer step with your own keys.
+# Signing: if the GPG_PRIVATE_KEY secret is set, each SHA256SUMS file is GPG
+# detached-signed (SHA256SUMS-*.txt.asc) so anyone can verify every artifact with
+# the published Qlucent public key (see README "Verifying releases"). Without the
+# secret, signing is skipped and the release still builds. Native rpm/deb-manager
+# package signing and msi Authenticode (needs a real code-signing cert / HSM) are
+# documented fast-follows.
 #
 # NOTE: cargo-deb / cargo-generate-rpm / cargo-wix are not available in the authoring
 # environment, so the packaging steps are validated on the first tagged build. If a
@@ -95,6 +99,30 @@ jobs:
       - name: Checksums
         run: (cd dist && sha256sum torda-* *.deb *.rpm > SHA256SUMS-linux.txt)
 
+      # Detached-sign the checksums so anyone can verify every Linux artifact with
+      # the published Qlucent public key. Gated: skipped cleanly when no key secret.
+      - name: Detect GPG signing key
+        id: gpg
+        shell: bash
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+        run: |
+          if [ -n "$GPG_PRIVATE_KEY" ]; then echo "present=true"; else echo "present=false"; fi >> "$GITHUB_OUTPUT"
+
+      - name: GPG-sign checksums
+        if: steps.gpg.outputs.present == 'true'
+        shell: bash
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+        run: |
+          echo "$GPG_PRIVATE_KEY" | gpg --batch --import
+          KEYID=$(gpg --list-secret-keys --with-colons | awk -F: '/^sec:/ {print $5; exit}')
+          gpg --batch --yes --pinentry-mode loopback --passphrase "${GPG_PASSPHRASE:-}" \
+            --armor --detach-sign -u "$KEYID" \
+            -o dist/SHA256SUMS-linux.txt.asc dist/SHA256SUMS-linux.txt
+          echo "Signed SHA256SUMS-linux.txt with GPG key $KEYID"
+
       - name: Upload Linux artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -140,6 +168,30 @@ jobs:
       - name: Checksums
         shell: bash
         run: (cd dist && sha256sum torda-*.exe *.msi > SHA256SUMS-windows.txt)
+
+      # Detached-sign the checksums (gpg ships with Git for Windows on the runner).
+      # Gated: skipped cleanly when no key secret is configured.
+      - name: Detect GPG signing key
+        id: gpg
+        shell: bash
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+        run: |
+          if [ -n "$GPG_PRIVATE_KEY" ]; then echo "present=true"; else echo "present=false"; fi >> "$GITHUB_OUTPUT"
+
+      - name: GPG-sign checksums
+        if: steps.gpg.outputs.present == 'true'
+        shell: bash
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+        run: |
+          echo "$GPG_PRIVATE_KEY" | gpg --batch --import
+          KEYID=$(gpg --list-secret-keys --with-colons | awk -F: '/^sec:/ {print $5; exit}')
+          gpg --batch --yes --pinentry-mode loopback --passphrase "${GPG_PASSPHRASE:-}" \
+            --armor --detach-sign -u "$KEYID" \
+            -o dist/SHA256SUMS-windows.txt.asc dist/SHA256SUMS-windows.txt
+          echo "Signed SHA256SUMS-windows.txt with GPG key $KEYID"
 
       - name: Upload Windows artifacts
         uses: actions/upload-artifact@v4

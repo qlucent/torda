@@ -186,6 +186,22 @@ time (see [`docs/DEPLOY.md`](docs/DEPLOY.md) §5).
 production hardening (a TLS + auth OpenSearch profile, a bundled Windows service
 wrapper).
 
+## Verifying releases
+
+Each release's `SHA256SUMS-*.txt` is GPG-signed, so you can verify the
+authenticity **and** integrity of every artifact with one key:
+
+```bash
+# Import the Qlucent signing key once (also published on keys.openpgp.org):
+curl -fsSL https://raw.githubusercontent.com/qlucent/torda/main/qlucent.asc | gpg --import
+
+# Verify the signed checksums, then the files you downloaded against them:
+gpg --verify SHA256SUMS-linux.txt.asc SHA256SUMS-linux.txt
+sha256sum -c SHA256SUMS-linux.txt          # Windows: SHA256SUMS-windows.txt(.asc)
+```
+
+Signed checksums appear on releases built after the signing key was configured.
+
 ## License
 
 Two licenses, split so the part you run is fully open and the backend core is
