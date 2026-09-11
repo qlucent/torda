@@ -32,8 +32,10 @@ on:
   push:
     tags: ["v*"]
 
+# Read-only by default; only the publish job below elevates to contents: write,
+# so the token exposed to cargo-binstall in the build jobs is read-only.
 permissions:
-  contents: write   # create the Release and upload assets
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -59,7 +61,7 @@ jobs:
       # from source (llvm-sys pins a specific, often-unreleased LLVM; that source
       # build is what failed CI). binstall fetches the *-unknown-linux-musl binary.
       - name: Install cargo-binstall
-        uses: cargo-bins/cargo-binstall@main
+        uses: cargo-bins/cargo-binstall@b874e25ea559687bec77e281e9b271aa1367b624 # main @ 2026-09
       - name: Install bpf-linker (prebuilt)
         env:
           # Authenticated GitHub API (5000/hr) so binstall's release lookup
@@ -207,6 +209,8 @@ jobs:
     name: Publish GitHub Release
     needs: [linux, windows]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the Release and upload assets
     steps:
       - name: Download built artifacts
         uses: actions/download-artifact@v4
