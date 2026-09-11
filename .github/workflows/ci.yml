@@ -1,55 +1,90 @@
 name: CI
 
-# Gates the DEFAULT (stub-substrate) build only: fmt, clippy, build, test.
-#
-# Deferred: CI legs for `--features
-# linux-ebpf` / `--features windows-etw`. Those need a nightly toolchain +
-# bpf-linker (linux-ebpf) or an elevated/Administrator runner (windows-etw)
-# to actually exercise the kernel-probe path, which is out of scope for this
-# workflow. The default build below never pulls aya/ferrisetw and needs
-# neither privilege nor a special toolchain.
+# Three legs:
+#   1. `stub`        — the default (stub-substrate) build: fmt + clippy + build +
+#                      test on Linux and Windows. Needs no privilege or toolchain.
+#   2. `linux-ebpf`  — the real eBPF backend: clippy + test with `--features
+#                      linux-ebpf`. The substrate build.rs shells to `cargo
+#                      +nightly` and links with bpf-linker, so this leg installs
+#                      nightly + rust-src and a prebuilt bpf-linker. Loading eBPF
+#                      needs root, so tests run non-root and exercise the
+#                      fail-soft-to-stub path (they never load a probe in CI).
+#   3. `windows-etw` — the real ETW backend: clippy + test with `--features
+#                      windows-etw` (ferrisetw, stable — no nightly). ETW session
+#                      creation needs Administrator, so tests run unprivileged and
+#                      exercise the same fail-soft path.
 
 on:
   push:
+    branches: [main]
   pull_request:
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build-test:
-    name: fmt + clippy + build + test (${{ matrix.os }})
+  stub:
+    name: stub build — ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest]
-        include:
-          # Nice-to-have leg: the default (stub-substrate) build on Windows.
-          - os: windows-latest
-
+        os: [ubuntu-latest, windows-latest]
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-
-      - name: Install stable Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-
-      - name: Cache cargo registry and build artifacts
-        uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@v2
         with:
           workspaces: . -> target
-
       - name: cargo fmt --check
         run: cargo fmt --all --check
-
       - name: cargo clippy (deny warnings)
         run: cargo clippy --all-targets -- -D warnings
-
       - name: cargo build --workspace
         run: cargo build --workspace
-
       - name: cargo test --workspace
         run: cargo test --workspace
+
+  linux-ebpf:
+    name: linux-ebpf backend
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Host toolchain (stable) builds the agent; the eBPF build.rs shells out to
+      # `cargo +nightly`, and the kernel crate's build-std = ["core"] needs rust-src.
+      - name: Install Rust toolchains (stable + nightly + rust-src)
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy --no-self-update
+          rustup toolchain install nightly --profile minimal --component rust-src --no-self-update
+          rustup default stable
+      # Prebuilt binary — building bpf-linker from source pins an often-unreleased
+      # LLVM. binstall fetches the *-unknown-linux-musl release binary.
+      - name: Install cargo-binstall
+        uses: cargo-bins/cargo-binstall@main
+      - name: Install bpf-linker (prebuilt)
+        run: cargo binstall -y bpf-linker
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: . -> target
+      - name: cargo clippy (eBPF backend, deny warnings)
+        run: cargo clippy --bin torda --features linux-ebpf -- -D warnings
+      - name: cargo test (eBPF backend, non-root -> stub fallback)
+        run: cargo test -p torda --features linux-ebpf
+
+  windows-etw:
+    name: windows-etw backend
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: . -> target
+      - name: cargo clippy (ETW backend, deny warnings)
+        run: cargo clippy --bin torda --features windows-etw -- -D warnings
+      - name: cargo test (ETW backend, non-Administrator -> stub fallback)
+        run: cargo test -p torda --features windows-etw
