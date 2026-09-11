@@ -21,6 +21,7 @@ members = [
   "server/ingest",
   "server/remediation",
   "server/control-plane",
+  "server/control-server",
   "server/transport",
   "server/transport-tls",
 ]

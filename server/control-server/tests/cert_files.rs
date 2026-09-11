@@ -26,8 +26,9 @@ use rustls::ServerConfig;
 
 use torda_control_plane::{
     AgentControlHandler, AgentControlLoop, CommandOutcome, CommandResult, CommandSigner,
-    ControlPlaneClient, Ed25519Verifier,
+    Ed25519Verifier,
 };
+use torda_control_server::{client_config_from_files, connect, ControlPlaneClient};
 use torda_remediation::action::{
     ActionState, AssetSelector, CanarySpec, Method, RemediationAction, VerifySpec,
 };
@@ -36,8 +37,8 @@ use torda_remediation::bridge::{Bridge, Executor, Verifier, VerifyOutcome};
 use torda_remediation::control::{CommandKind, ControlCommand, Role, RolePolicy, SystemClock};
 use torda_transport::Transport;
 use torda_transport_tls::{
-    accept, client_config_from_files, connect, generate_test_pki, server_config_from_files,
-    write_pki_to_der, write_pki_to_pem, CertFilePaths, MAX_CERT_FILE_BYTES,
+    accept, generate_test_pki, server_config_from_files, write_pki_to_der, write_pki_to_pem,
+    CertFilePaths, MAX_CERT_FILE_BYTES,
 };
 
 const READ_TIMEOUT: Duration = Duration::from_secs(10);

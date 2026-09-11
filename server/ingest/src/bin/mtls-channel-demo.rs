@@ -40,9 +40,9 @@ use rustls::pki_types::{CertificateDer, ServerName};
 use rustls::{ClientConfig, ServerConfig};
 
 use torda_control_plane::{
-    AgentControlHandler, AgentControlLoop, CommandOutcome, CommandSigner, ControlPlaneClient,
-    Ed25519Verifier,
+    AgentControlHandler, AgentControlLoop, CommandOutcome, CommandSigner, Ed25519Verifier,
 };
+use torda_control_server::{client_config_from_files, connect, ControlPlaneClient};
 use torda_remediation::action::{
     ActionState, AssetSelector, CanarySpec, Method, RemediationAction, VerifySpec,
 };
@@ -50,9 +50,9 @@ use torda_remediation::audit::VecAuditSink;
 use torda_remediation::bridge::{Bridge, Executor, Verifier, VerifyOutcome};
 use torda_remediation::control::{CommandKind, ControlCommand, Role, RolePolicy, SystemClock};
 use torda_transport_tls::{
-    accept, client_config, client_config_from_files, connect, generate_revocation_test_pki,
-    generate_test_pki, server_config, server_config_from_files, server_config_from_files_with_crl,
-    write_pki_to_pem, CertFilePaths, CertFileSpec, ReloadableServerConfig,
+    accept, client_config, generate_revocation_test_pki, generate_test_pki, server_config,
+    server_config_from_files, server_config_from_files_with_crl, write_pki_to_pem, CertFilePaths,
+    CertFileSpec, ReloadableServerConfig,
 };
 
 /// Generous read timeout: the loopback round-trip completes in milliseconds; this only exists
@@ -224,7 +224,7 @@ fn round_trip(
 /// prove a server-rejected peer is served nothing even if its own `connect` optimistically
 /// returned `Ok` under TLS 1.3. Mirrors `cert_revocation.rs::client_gets_applied`.
 fn client_gets_applied(
-    transport: &mut torda_transport_tls::TlsClientTransport,
+    transport: &mut torda_control_server::TlsClientTransport,
     session: &str,
 ) -> bool {
     let operator = CommandSigner::from_seed("operator", [7u8; 32]);

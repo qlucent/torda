@@ -30,6 +30,10 @@ torda-findings-engine = { path = "../findings-engine" }
 torda-compliance = { path = "../../crates/compliance" }
 torda-remediation = { path = "../remediation" }
 torda-control-plane = { path = "../control-plane" }
+# FSL issuer surface (ControlPlaneClient / ResultCorrelator / establish_session + the
+# file-loaded mTLS client config). ingest is itself FSL, so a normal dep here is fine
+# (FSL -> FSL); the mtls-channel-demo + remediation-demo bins drive the full client channel.
+torda-control-server = { path = "../control-server" }
 torda-transport = { path = "../transport" }
 # mtls-channel-demo: real mutual-TLS carrier for the control channel (demo-only).
 torda-transport-tls = { path = "../transport-tls" }

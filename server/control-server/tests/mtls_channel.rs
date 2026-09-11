@@ -23,8 +23,9 @@ use rustls::ServerConfig;
 
 use torda_control_plane::{
     AgentControlHandler, AgentControlLoop, CommandOutcome, CommandResult, CommandSigner,
-    ControlPlaneClient, Ed25519Verifier,
+    Ed25519Verifier,
 };
+use torda_control_server::{connect, ControlPlaneClient};
 use torda_remediation::action::{
     ActionState, AssetSelector, CanarySpec, Method, RemediationAction, VerifySpec,
 };
@@ -33,7 +34,7 @@ use torda_remediation::bridge::{Bridge, Executor, Verifier, VerifyOutcome};
 use torda_remediation::control::{CommandKind, ControlCommand, Role, RolePolicy, SystemClock};
 use torda_transport::Transport;
 use torda_transport_tls::{
-    accept, client_config, connect, generate_test_pki, server_config, session_from_cert,
+    accept, client_config, generate_test_pki, server_config, session_from_cert,
 };
 
 /// Generous read timeout: the loopback round-trip completes in milliseconds; this only

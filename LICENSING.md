@@ -25,7 +25,7 @@ the backend core is protected from resale.
 | License | Crates |
 | --- | --- |
 | **Apache-2.0** ([`LICENSE`](LICENSE)) | the agent (`torda`) and everything it links: `torda-core`, `torda-substrate`, `torda-ocsf`, `torda-findings`, `torda-compliance`, all `torda-mod-*` modules, `torda-remediation`, `torda-control-plane`, `torda-transport`, `torda-transport-tls`, and the kernel-side eBPF crates. The collector bundle and dashboards under `deploy/` are Apache-2.0 too. |
-| **FSL-1.1-ALv2** ([`LICENSE-FSL-1.1.md`](LICENSE-FSL-1.1.md)) | `torda-findings-engine` (`server/findings-engine`) and `torda-ingest` (`server/ingest`) — the Findings Engine + ingest/scoring pipeline. |
+| **FSL-1.1-ALv2** ([`LICENSE-FSL-1.1.md`](LICENSE-FSL-1.1.md)) | `torda-findings-engine` (`server/findings-engine`) and `torda-ingest` (`server/ingest`) — the Findings Engine + ingest/scoring pipeline — and `torda-control-server` (`server/control-server`) — the orchestration/issuer half of the control channel. |
 
 The boundary is dependency-clean: nothing Apache-licensed depends on an FSL crate,
 so the agent is genuinely Apache-only.
@@ -42,11 +42,22 @@ service, while still letting you self-host and audit it, and it becomes fully op
 
 ## Roadmap note
 
-Some crates the agent links (`torda-remediation`, `torda-control-plane`, `torda-transport*`)
-contain both client and server-side code. They are Apache-2.0 today because the
-agent links them. A planned refactor splits each into a client
-half (stays Apache, agent-linked) and a server/orchestration half (moves to FSL), so
-more of the backend can be protected without making the useful agent an FSL build.
+The control channel has a deliberate **role inversion**: the agent is the mutual-TLS
+**server** (it runs the listener, authenticates peers, and locally executes signed
+commands through its replay-guarded loop), while the orchestration control plane is the
+mTLS **client / issuer** that connects in and signs commands. The first split along this
+seam is done: the issuer/orchestration surface — the client carrier + file-loaded client
+config (`connect`, `TlsClientTransport`, `client_config_from_files`) and the operator-side
+driver (`ControlPlaneClient`, `ResultCorrelator`, `establish_session`) — now lives in the
+FSL crate **`torda-control-server`**, while everything the agent links to *be* the server
+(accept/`TlsServerTransport`, the cert/PKI loaders, `Ed25519Verifier`/`CommandSigner`,
+`AgentControlLoop`, and all of `torda-remediation`/`torda-transport`) stays Apache-2.0. No
+Apache crate takes a normal dependency on `torda-control-server`, so the agent stays a
+genuine Apache-only build; the only normal consumer is the FSL `torda-ingest`.
+
+`torda-remediation`, `torda-control-plane`, and `torda-transport*` still contain some
+server-adjacent code that remains Apache because the agent links it; further carving of
+orchestration-only surface into FSL crates can follow the same client/issuer boundary.
 
 ## Contributing
 

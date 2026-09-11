@@ -26,11 +26,11 @@
 //! [`server_config_from_files`] installs the **mandatory** client-cert verifier
 //! ([`WebPkiClientVerifier::builder(roots).build()`](WebPkiClientVerifier) — the same
 //! `.build()` required variant [`crate::server_config`] uses, never
-//! `allow_unauthenticated`, never a `dangerous()`/accept-any verifier).
-//! [`client_config_from_files`] verifies the server against the loaded CA roots
-//! ([`ClientConfig::with_root_certificates`]) and presents the client cert
-//! ([`ClientConfig::with_client_auth_cert`]) — no `dangerous()` no-op verifier. Loading
-//! from files does not weaken authentication in any way.
+//! `allow_unauthenticated`, never a `dangerous()`/accept-any verifier). The ISSUER-side
+//! file-loaded `ClientConfig` builder (`client_config_from_files`) lives in the FSL
+//! `torda-control-server` crate and reuses [`load_root_store`] from here; it verifies the
+//! server against the loaded CA roots and presents the client cert with no `dangerous()`
+//! no-op verifier. Loading from files does not weaken authentication in any way.
 //!
 //! ## Multi-CA root store = rotation overlap
 //!
@@ -51,7 +51,7 @@ use base64::Engine as _;
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, CertificateRevocationListDer, PrivateKeyDer};
 use rustls::server::WebPkiClientVerifier;
-use rustls::{ClientConfig, RootCertStore, ServerConfig};
+use rustls::{RootCertStore, ServerConfig};
 
 use crate::TestPki;
 
@@ -220,7 +220,10 @@ pub fn load_crls_from_files(
 ///
 /// Fail-closed: an unreadable/oversized CA file, a garbage CA cert, or a cert the root
 /// store rejects as an invalid trust anchor all propagate `Err`.
-fn load_root_store(ca_paths: &[&Path]) -> io::Result<RootCertStore> {
+///
+/// `pub` so the issuer-side client-config builder in `torda-control-server` can reuse this
+/// exact multi-CA trust-store construction when it loads a [`ClientConfig`] from files.
+pub fn load_root_store(ca_paths: &[&Path]) -> io::Result<RootCertStore> {
     let mut roots = RootCertStore::empty();
     for path in ca_paths {
         let bytes = read_capped_cert_file(path)?;
@@ -322,36 +325,6 @@ pub fn server_config_from_files_with_crl(
             .map_err(io::Error::other)?
             .with_client_cert_verifier(client_verifier)
             .with_single_cert(chain, leaf_key)
-            .map_err(io::Error::other)?;
-
-    Ok(Arc::new(config))
-}
-
-/// Build a mutual-TLS [`ClientConfig`] from ops-provisioned FILES.
-///
-/// - `ca_paths`: one or more CA files (PEM or DER); ALL their CA certs form the multi-CA
-///   trust root used to verify the SERVER certificate
-///   ([`ClientConfig::with_root_certificates`]) — no `dangerous()`/accept-any verifier.
-/// - `cert_chain`: the client leaf chain file (PEM chain or single DER).
-/// - `key`: the client private-key file (PEM or DER); presented via
-///   [`ClientConfig::with_client_auth_cert`] so the server can authenticate this client.
-///
-/// The ring provider is supplied explicitly. Any error maps to [`io::Error`]; no panics.
-pub fn client_config_from_files(
-    ca_paths: &[&Path],
-    cert_chain: &Path,
-    key: &Path,
-) -> io::Result<Arc<ClientConfig>> {
-    let roots = load_root_store(ca_paths)?;
-    let chain = load_certs(&read_capped_cert_file(cert_chain)?)?;
-    let leaf_key = load_private_key(&read_capped_cert_file(key)?)?;
-
-    let config =
-        ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
-            .with_safe_default_protocol_versions()
-            .map_err(io::Error::other)?
-            .with_root_certificates(roots)
-            .with_client_auth_cert(chain, leaf_key)
             .map_err(io::Error::other)?;
 
     Ok(Arc::new(config))

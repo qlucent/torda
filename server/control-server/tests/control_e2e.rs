@@ -22,13 +22,13 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rustls::pki_types::{CertificateDer, ServerName};
 
-use torda_control_plane::{CommandOutcome, CommandSigner, ControlPlaneClient, Ed25519Verifier};
+use torda_control_plane::{CommandOutcome, CommandSigner, Ed25519Verifier};
+use torda_control_server::{
+    client_config_from_files, connect, ControlPlaneClient, TlsClientTransport,
+};
 use torda_remediation::action::{AssetSelector, CanarySpec, Method, RemediationAction, VerifySpec};
 use torda_remediation::control::{CommandKind, ControlCommand};
-use torda_transport_tls::{
-    client_config_from_files, connect, generate_test_pki, write_pki_to_pem, CertFilePaths,
-    TlsClientTransport,
-};
+use torda_transport_tls::{generate_test_pki, write_pki_to_pem, CertFilePaths};
 
 use torda::{load_config, spawn_control_service, AgentConfig, CertPaths, ControlConfig, RoleEntry};
 
