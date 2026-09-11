@@ -16,8 +16,43 @@ no license.
 > access to every index. This is fine for a laptop demo bound to `localhost`.
 > It is **never** acceptable to expose these ports on a network, in a cloud
 > security group, or in production. See `docs/DEPLOY.md` for the
-> production-shipping path (agent -> your own secured SIEM/shipper), and the
-> deferred backlog for a production-secure OpenSearch profile (TLS + auth).
+> production-shipping path (agent -> your own secured SIEM/shipper). For a
+> profile with **TLS + authentication enabled**, use the secure profile below.
+
+## Secure profile (TLS + auth)
+
+`docker-compose.secure.yml` runs the same stack with the **OpenSearch security
+plugin enabled** — TLS on the REST API and required authentication — instead of
+the security-disabled dev quickstart.
+
+```bash
+cp .env.secure.example .env          # then edit .env and set a STRONG password
+docker compose -f docker-compose.secure.yml up -d
+
+# verify (self-signed demo cert -> -k):
+curl -k -u "admin:$OPENSEARCH_ADMIN_PASSWORD" https://localhost:9200/_cluster/health
+# open the UI and log in as admin / your password:
+#   https://localhost:5601   (or http://localhost:5601 -> login screen)
+```
+
+What it changes vs the dev profile:
+
+- OpenSearch requires auth (unauthenticated requests get `401`) and serves REST
+  over **TLS** (plain HTTP is refused). The admin password comes from
+  `.env` (`OPENSEARCH_ADMIN_PASSWORD`; must be 8+ chars with upper/lower/digit/
+  special or the node won't boot).
+- Dashboards authenticates to OpenSearch (`config/opensearch_dashboards.secure.yml`)
+  and end users log in as `admin`.
+- Vector ships over `https` with basic auth (`vector.secure.toml`).
+
+**Demo-cert caveat / hardening for production:** TLS here uses OpenSearch's
+auto-generated **self-signed demo certificates**, so certificate verification is
+relaxed (`vector` `verify_certificate = false`; Dashboards
+`opensearch.ssl.verificationMode: none`). Encryption + auth are real, but for a
+true production deployment you should replace the demo certs with your own
+CA-issued node/admin certs, turn verification back **on**, create dedicated
+non-admin users/roles, and serve Dashboards itself over HTTPS. The `.env` file is
+git-ignored — never commit your password.
 
 ## Prerequisites
 

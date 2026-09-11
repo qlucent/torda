@@ -11,3 +11,6 @@ Cargo.lock
 
 # Claude Code agent guidance — not part of the public product
 /CLAUDE.md
+
+# Secure collector local secrets (never commit the real .env)
+deploy/collector/.env

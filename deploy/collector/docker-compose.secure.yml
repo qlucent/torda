@@ -1,0 +1,77 @@
+# Secure collector profile — OpenSearch security plugin ENABLED (TLS + auth),
+# in contrast to docker-compose.yml (the dev quickstart, no auth/TLS).
+#
+#   1. cp .env.secure.example .env      # then set a STRONG OPENSEARCH_ADMIN_PASSWORD
+#   2. docker compose -f docker-compose.secure.yml up -d
+#   3. curl -k -u admin:$OPENSEARCH_ADMIN_PASSWORD https://localhost:9200/_cluster/health
+#   4. open https://localhost:5601  (log in as admin / your password)
+#
+# TLS uses OpenSearch's auto-generated demo certificates (self-signed). That
+# encrypts traffic and enforces authentication — the point of this profile.
+# For a real production deployment, replace the demo certs with your own
+# CA-issued node/admin certs and turn certificate verification back ON (Vector
+# tls.verify_certificate + a ca_file; Dashboards opensearch.ssl.verificationMode:
+# full). See README "Secure profile".
+services:
+  opensearch:
+    image: opensearchproject/opensearch:2.17.1
+    container_name: torda-collector-opensearch
+    environment:
+      - discovery.type=single-node
+      - OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m
+      # Security plugin ENABLED (no DISABLE_SECURITY_PLUGIN). The demo config
+      # bootstraps TLS certs + the security index; the admin password comes from
+      # .env and MUST be strong (8+ chars incl. upper/lower/digit/special) or the
+      # node refuses to boot.
+      - OPENSEARCH_INITIAL_ADMIN_PASSWORD=${OPENSEARCH_ADMIN_PASSWORD:?set OPENSEARCH_ADMIN_PASSWORD in .env}
+      - OPENSEARCH_ADMIN_PASSWORD=${OPENSEARCH_ADMIN_PASSWORD}
+      - bootstrap.memory_lock=true
+    ulimits:
+      memlock: { soft: -1, hard: -1 }
+      nofile: { soft: 65536, hard: 65536 }
+    ports:
+      # Even with auth+TLS, default to localhost. Once you trust the deployment
+      # (real certs, firewall), you can bind 0.0.0.0 behind your own controls.
+      - "127.0.0.1:9200:9200"
+    volumes:
+      - opensearch-secure-data:/usr/share/opensearch/data
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "curl -s -k -u admin:$${OPENSEARCH_ADMIN_PASSWORD} https://localhost:9200/_cluster/health || exit 1",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 40
+      start_period: 45s
+
+  opensearch-dashboards:
+    image: opensearchproject/opensearch-dashboards:2.17.1
+    container_name: torda-collector-dashboards
+    environment:
+      - OPENSEARCH_HOSTS=["https://opensearch:9200"]
+    volumes:
+      - ./config/opensearch_dashboards.secure.yml:/usr/share/opensearch-dashboards/config/opensearch_dashboards.yml:ro
+    ports:
+      - "127.0.0.1:5601:5601"
+    depends_on:
+      opensearch:
+        condition: service_healthy
+
+  vector:
+    image: timberio/vector:0.41.1-alpine
+    container_name: torda-collector-vector
+    environment:
+      # Vector interpolates ${OPENSEARCH_ADMIN_PASSWORD} in vector.secure.toml.
+      - OPENSEARCH_ADMIN_PASSWORD=${OPENSEARCH_ADMIN_PASSWORD}
+    volumes:
+      - ./vector.secure.toml:/etc/vector/vector.toml:ro
+      - ./ingest:/ingest:ro
+    command: ["--config", "/etc/vector/vector.toml"]
+    depends_on:
+      opensearch:
+        condition: service_healthy
+
+volumes:
+  opensearch-secure-data:
