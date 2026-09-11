@@ -36,10 +36,11 @@ services:
     volumes:
       - opensearch-secure-data:/usr/share/opensearch/data
     healthcheck:
+      # Keep the password out of argv/`ps`: write a mode-600 netrc, then curl it.
       test:
         [
           "CMD-SHELL",
-          "curl -s -k -u admin:$${OPENSEARCH_ADMIN_PASSWORD} https://localhost:9200/_cluster/health || exit 1",
+          "umask 077; printf 'machine localhost login admin password %s' \"$${OPENSEARCH_ADMIN_PASSWORD}\" > /tmp/oshc.netrc && curl -s -k --netrc-file /tmp/oshc.netrc https://localhost:9200/_cluster/health || exit 1",
         ]
       interval: 10s
       timeout: 5s
@@ -59,12 +60,29 @@ services:
       opensearch:
         condition: service_healthy
 
+  # One-shot: provisions a least-privilege `torda-ingest` user so Vector does not
+  # run as the admin superuser. Exits after provisioning; Vector waits for it.
+  security-bootstrap:
+    image: opensearchproject/opensearch:2.17.1
+    container_name: torda-collector-bootstrap
+    environment:
+      - OPENSEARCH_ADMIN_PASSWORD=${OPENSEARCH_ADMIN_PASSWORD}
+      - OPENSEARCH_INGEST_PASSWORD=${OPENSEARCH_INGEST_PASSWORD:?set OPENSEARCH_INGEST_PASSWORD in .env}
+    volumes:
+      - ./config/security-bootstrap.sh:/bootstrap.sh:ro
+    entrypoint: ["/bin/bash", "/bootstrap.sh"]
+    restart: "no"
+    depends_on:
+      opensearch:
+        condition: service_healthy
+
   vector:
     image: timberio/vector:0.41.1-alpine
     container_name: torda-collector-vector
     environment:
-      # Vector interpolates ${OPENSEARCH_ADMIN_PASSWORD} in vector.secure.toml.
-      - OPENSEARCH_ADMIN_PASSWORD=${OPENSEARCH_ADMIN_PASSWORD}
+      # Vector authenticates as the least-privilege torda-ingest user (not admin);
+      # interpolated into vector.secure.toml.
+      - OPENSEARCH_INGEST_PASSWORD=${OPENSEARCH_INGEST_PASSWORD}
     volumes:
       - ./vector.secure.toml:/etc/vector/vector.toml:ro
       - ./ingest:/ingest:ro
@@ -72,6 +90,8 @@ services:
     depends_on:
       opensearch:
         condition: service_healthy
+      security-bootstrap:
+        condition: service_completed_successfully
 
 volumes:
   opensearch-secure-data:

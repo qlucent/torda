@@ -1,7 +1,8 @@
 # Collector-side Vector config for the SECURE profile: same file->OpenSearch
-# pipelines as vector.toml, but shipping over HTTPS with basic auth. The password
-# is interpolated from the OPENSEARCH_ADMIN_PASSWORD env var passed to the vector
-# container by docker-compose.secure.yml.
+# pipelines as vector.toml, but shipping over HTTPS with basic auth as the
+# least-privilege `torda-ingest` user (provisioned by config/security-bootstrap.sh
+# — NOT admin). The password is interpolated from OPENSEARCH_INGEST_PASSWORD,
+# passed to the vector container by docker-compose.secure.yml.
 #
 # verify_certificate = false because the profile uses OpenSearch's self-signed
 # demo certs. For production, mount your CA and set verify_certificate = true with
@@ -29,8 +30,8 @@ bulk.index = "torda-ocsf-%Y.%m.%d"
 api_version = "v7"
 [sinks.opensearch.auth]
 strategy = "basic"
-user = "admin"
-password = "${OPENSEARCH_ADMIN_PASSWORD}"
+user = "torda-ingest"
+password = "${OPENSEARCH_INGEST_PASSWORD}"
 [sinks.opensearch.tls]
 verify_certificate = false
 [sinks.opensearch.healthcheck]
@@ -60,8 +61,8 @@ bulk.index = "torda-findings-%Y.%m.%d"
 api_version = "v7"
 [sinks.opensearch_findings.auth]
 strategy = "basic"
-user = "admin"
-password = "${OPENSEARCH_ADMIN_PASSWORD}"
+user = "torda-ingest"
+password = "${OPENSEARCH_INGEST_PASSWORD}"
 [sinks.opensearch_findings.tls]
 verify_certificate = false
 [sinks.opensearch_findings.healthcheck]
@@ -93,8 +94,8 @@ bulk.index = "torda-remediation-%Y.%m.%d"
 api_version = "v7"
 [sinks.opensearch_remediation.auth]
 strategy = "basic"
-user = "admin"
-password = "${OPENSEARCH_ADMIN_PASSWORD}"
+user = "torda-ingest"
+password = "${OPENSEARCH_INGEST_PASSWORD}"
 [sinks.opensearch_remediation.tls]
 verify_certificate = false
 [sinks.opensearch_remediation.healthcheck]

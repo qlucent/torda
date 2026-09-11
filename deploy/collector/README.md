@@ -43,16 +43,21 @@ What it changes vs the dev profile:
   special or the node won't boot).
 - Dashboards authenticates to OpenSearch (`config/opensearch_dashboards.secure.yml`)
   and end users log in as `admin`.
-- Vector ships over `https` with basic auth (`vector.secure.toml`).
+- Vector ships over `https` as a **least-privilege `torda-ingest` user** — write
+  access to the `torda-*` indices only, provisioned automatically on first boot by
+  `config/security-bootstrap.sh`. The log shipper never holds admin credentials.
+- Dashboards authenticates to OpenSearch as the built-in `kibanaserver` demo
+  service account (a limited-privilege account — human logins use `admin`).
 
-**Demo-cert caveat / hardening for production:** TLS here uses OpenSearch's
-auto-generated **self-signed demo certificates**, so certificate verification is
-relaxed (`vector` `verify_certificate = false`; Dashboards
+**Demo-cert / demo-user caveat — harden before production:** TLS here uses
+OpenSearch's auto-generated **self-signed demo certificates**, so certificate
+verification is relaxed (`vector` `verify_certificate = false`; Dashboards
 `opensearch.ssl.verificationMode: none`). Encryption + auth are real, but for a
-true production deployment you should replace the demo certs with your own
-CA-issued node/admin certs, turn verification back **on**, create dedicated
-non-admin users/roles, and serve Dashboards itself over HTTPS. The `.env` file is
-git-ignored — never commit your password.
+true production deployment you should: replace the demo certs with your own
+CA-issued node/admin certs and turn verification back **on**; **rotate the demo
+internal-user passwords** (`kibanaserver`, etc.) via `securityadmin.sh`; and serve
+Dashboards itself over HTTPS. The `.env` file is git-ignored — never commit your
+passwords.
 
 ## Prerequisites
 
