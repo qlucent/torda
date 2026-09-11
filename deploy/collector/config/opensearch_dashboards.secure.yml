@@ -1,0 +1,19 @@
+# OpenSearch Dashboards config for the SECURE collector profile.
+# Talks to OpenSearch over TLS and authenticates as the built-in `kibanaserver`
+# service account (this is the dashboards<->opensearch service login, NOT the
+# human login — end users sign in to the UI as admin + the password you set in
+# .env). Demo certs are self-signed, so verification is relaxed here; for real
+# production point at your CA and set verificationMode: full.
+server.host: "0.0.0.0"
+server.name: "torda-collector-dashboards"
+
+opensearch.hosts: ["https://opensearch:9200"]
+opensearch.ssl.verificationMode: none
+opensearch.username: "kibanaserver"
+opensearch.password: "kibanaserver"
+opensearch.requestHeadersAllowlist: ["authorization", "securitytenant"]
+
+opensearch_security.multitenancy.enabled: false
+opensearch_security.readonly_mode.roles: ["kibana_read_only"]
+# Set to true once Dashboards itself is served over HTTPS (reverse proxy / TLS).
+opensearch_security.cookie.secure: false
