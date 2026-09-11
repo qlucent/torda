@@ -22,6 +22,11 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+# Read-only token — CI needs no write access, and cargo-binstall runs downloaded
+# third-party code (bpf-linker) that this token is exposed to.
+permissions:
+  contents: read
+
 jobs:
   stub:
     name: stub build — ${{ matrix.os }}
@@ -62,8 +67,12 @@ jobs:
       # Prebuilt binary — building bpf-linker from source pins an often-unreleased
       # LLVM. binstall fetches the *-unknown-linux-musl release binary.
       - name: Install cargo-binstall
-        uses: cargo-bins/cargo-binstall@main
+        uses: cargo-bins/cargo-binstall@b874e25ea559687bec77e281e9b271aa1367b624 # main @ 2026-09
       - name: Install bpf-linker (prebuilt)
+        env:
+          # Authenticated GitHub API (5000/hr) so binstall's release lookup
+          # doesn't hit the 60/hr unauthenticated rate limit.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: cargo binstall -y bpf-linker
       - uses: Swatinem/rust-cache@v2
         with:
