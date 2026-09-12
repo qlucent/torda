@@ -201,6 +201,15 @@ path = "src/bin/file-ebpf-demo.rs"
 name = "filemon-demo"
 path = "src/bin/filemon-demo.rs"
 
+# B3a (runtime-reachability telemetry): LIVE eBPF library-load demo — wires the
+# REAL LibLoadModule to the real EbpfBus (--features linux-ebpf, ROOT), spawns a
+# dynamically-linked child so the loader openat()s its .so deps, and self-asserts
+# at least one emitted OCSF Runtime Module Load (9003) record. Non-root it reports
+# the stub fallback and exits 0.
+[[bin]]
+name = "libload-ebpf-demo"
+path = "src/bin/libload-ebpf-demo.rs"
+
 [dependencies]
 anyhow.workspace = true
 tokio.workspace = true
@@ -219,6 +228,7 @@ torda-mod-fim = { path = "../modules/fim" }
 torda-mod-procmon = { path = "../modules/procmon" }
 torda-mod-netmon = { path = "../modules/netmon" }
 torda-mod-filemon = { path = "../modules/filemon" }
+torda-mod-libload = { path = "../modules/libload" }
 torda-mod-corr = { path = "../modules/corr" }
 # P3c-1: the secure control service wiring (all first-party crates).
 torda-control-plane = { path = "../../server/control-plane" }

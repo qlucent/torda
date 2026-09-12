@@ -5,20 +5,72 @@
 
 /// One installed software package. `source` records which inventory it came
 /// from (`dpkg`, `rpm`, `registry`) so provenance is preserved downstream.
+///
+/// `libraries` is the package's provided **shared-library files** (absolute
+/// paths, e.g. `/usr/lib/x86_64-linux-gnu/libssl.so.3`), when the inventory can
+/// enumerate them (dpkg today; empty otherwise). It is the join key for
+/// runtime-confirmed reachability: a `RUNTIME_MODULE_LOAD` observation of one of
+/// these paths means this package's code was actually loaded at runtime.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Package {
     pub name: String,
     pub version: String,
     pub source: String,
+    pub libraries: Vec<String>,
 }
 
 impl Package {
+    /// A package with no known library files. `with_libraries` attaches them.
     pub fn new(name: impl Into<String>, version: impl Into<String>, source: &str) -> Package {
         Package {
             name: name.into(),
             version: version.into(),
             source: source.to_string(),
+            libraries: Vec::new(),
         }
+    }
+
+    /// Attach the package's provided shared-library file paths.
+    pub fn with_libraries(mut self, libraries: Vec<String>) -> Package {
+        self.libraries = libraries;
+        self
+    }
+}
+
+/// True if `path`'s final component names a shared library — Linux `*.so` /
+/// `*.so.<ver>` or Windows `*.dll` (case-insensitive). Used both to pick
+/// library files out of a dpkg `.list` and (in `torda-mod-libload`) to filter
+/// `FileOpen` events down to library loads.
+pub fn is_shared_library_path(path: &str) -> bool {
+    let base = path
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(path)
+        .to_ascii_lowercase();
+    base.ends_with(".so") || base.contains(".so.") || base.ends_with(".dll")
+}
+
+/// The shared-library file paths listed in a dpkg `.list` file body (one path
+/// per line). Non-library lines (directories, binaries, docs) are dropped.
+pub fn shared_libraries_from_list(list_contents: &str) -> Vec<String> {
+    list_contents
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && is_shared_library_path(l))
+        .map(|l| l.to_string())
+        .collect()
+}
+
+/// The package name a dpkg info `.list` filename belongs to: strip the `.list`
+/// suffix, then any `:<arch>` multiarch qualifier (`libssl3:amd64.list` →
+/// `libssl3`). Returns `None` for a non-`.list` filename.
+pub fn pkg_name_from_list_filename(file_name: &str) -> Option<String> {
+    let stem = file_name.strip_suffix(".list")?;
+    let name = stem.split(':').next().unwrap_or(stem);
+    if name.is_empty() {
+        None
+    } else {
+        Some(name.to_string())
     }
 }
 
@@ -155,10 +207,50 @@ pub struct DpkgProvider;
 #[cfg(target_os = "linux")]
 impl PackageProvider for DpkgProvider {
     fn packages(&self) -> Vec<Package> {
-        std::fs::read_to_string("/var/lib/dpkg/status")
+        let packages = std::fs::read_to_string("/var/lib/dpkg/status")
             .map(|c| parse_dpkg_status(&c))
-            .unwrap_or_default()
+            .unwrap_or_default();
+        // Attach each package's provided shared libraries from its dpkg `.list`
+        // file (read once, best-effort — a missing/unreadable info dir just
+        // leaves libraries empty, never fails the snapshot).
+        let libs_by_pkg = read_dpkg_libraries(std::path::Path::new("/var/lib/dpkg/info"));
+        packages
+            .into_iter()
+            .map(|p| {
+                let libs = libs_by_pkg.get(&p.name).cloned().unwrap_or_default();
+                p.with_libraries(libs)
+            })
+            .collect()
     }
+}
+
+/// Read `<info_dir>/*.list`, returning a map from package name to the shared
+/// libraries it provides. Best-effort: an unreadable dir yields an empty map,
+/// an unreadable file is skipped. Two arches of one package merge their libs.
+#[cfg(target_os = "linux")]
+fn read_dpkg_libraries(
+    info_dir: &std::path::Path,
+) -> std::collections::HashMap<String, Vec<String>> {
+    let mut out: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+    let entries = match std::fs::read_dir(info_dir) {
+        Ok(e) => e,
+        Err(_) => return out,
+    };
+    for entry in entries.flatten() {
+        let file_name = entry.file_name();
+        let file_name = file_name.to_string_lossy();
+        let Some(pkg) = pkg_name_from_list_filename(&file_name) else {
+            continue;
+        };
+        let Ok(contents) = std::fs::read_to_string(entry.path()) else {
+            continue;
+        };
+        let libs = shared_libraries_from_list(&contents);
+        if !libs.is_empty() {
+            out.entry(pkg).or_default().extend(libs);
+        }
+    }
+    out
 }
 
 #[cfg(target_os = "linux")]
@@ -357,6 +449,54 @@ Version: 3.0
     #[test]
     fn empty_provider_returns_nothing() {
         assert!(EmptyProvider.packages().is_empty());
+    }
+
+    #[test]
+    fn is_shared_library_path_recognizes_so_and_dll() {
+        assert!(is_shared_library_path(
+            "/usr/lib/x86_64-linux-gnu/libssl.so.3"
+        ));
+        assert!(is_shared_library_path("/usr/lib/libssl.so"));
+        assert!(is_shared_library_path("libcrypto.so.3.0.0"));
+        assert!(is_shared_library_path(r"C:\Windows\System32\ssleay32.DLL"));
+        assert!(!is_shared_library_path("/usr/bin/openssl"));
+        assert!(!is_shared_library_path(
+            "/usr/share/doc/openssl/changelog.gz"
+        ));
+        assert!(!is_shared_library_path("/usr/lib/x86_64-linux-gnu/")); // a dir
+    }
+
+    #[test]
+    fn shared_libraries_from_list_keeps_only_libraries() {
+        let list = "\
+/.
+/usr/bin/openssl
+/usr/lib/x86_64-linux-gnu/libssl.so.3
+/usr/lib/x86_64-linux-gnu/libcrypto.so.3
+/usr/share/doc/openssl/copyright
+";
+        let libs = shared_libraries_from_list(list);
+        assert_eq!(
+            libs,
+            vec![
+                "/usr/lib/x86_64-linux-gnu/libssl.so.3".to_string(),
+                "/usr/lib/x86_64-linux-gnu/libcrypto.so.3".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn pkg_name_from_list_filename_strips_suffix_and_arch() {
+        assert_eq!(
+            pkg_name_from_list_filename("openssl.list").as_deref(),
+            Some("openssl")
+        );
+        assert_eq!(
+            pkg_name_from_list_filename("libssl3:amd64.list").as_deref(),
+            Some("libssl3")
+        );
+        assert_eq!(pkg_name_from_list_filename("openssl.md5sums"), None);
+        assert_eq!(pkg_name_from_list_filename(".list"), None);
     }
 
     #[test]

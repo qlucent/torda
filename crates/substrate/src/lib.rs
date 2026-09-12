@@ -95,6 +95,7 @@ impl SnapshotProvider for StubSnapshot {
                         "name": p.name,
                         "version": p.version,
                         "source": p.source,
+                        "libraries": p.libraries,
                     })
                 })
                 .collect(),
