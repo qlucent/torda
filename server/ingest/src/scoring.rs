@@ -23,6 +23,7 @@ pub(crate) fn neutral_enrichment() -> Enrichment {
         kev: false,
         exploit_maturity: ExploitMaturity::None,
         vex: VexStatus::Affected,
+        feed_version: None,
     }
 }
 

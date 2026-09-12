@@ -3,6 +3,7 @@ resolver = "2"
 members = [
   "crates/ocsf",
   "crates/findings",
+  "crates/feed",
   "crates/compliance",
   "crates/core",
   "crates/substrate",
@@ -19,6 +20,7 @@ members = [
   "crates/agent",
   "server/findings-engine",
   "server/ingest",
+  "server/feed-live",
   "server/remediation",
   "server/control-plane",
   "server/control-server",

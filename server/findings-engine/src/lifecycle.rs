@@ -74,6 +74,7 @@ mod tests {
                 kev: false,
                 exploit_maturity: ExploitMaturity::Functional,
                 vex: VexStatus::Affected,
+                feed_version: None,
             },
             asset_ctx: AssetContext {
                 internet_facing: false,

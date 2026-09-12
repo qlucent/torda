@@ -1,0 +1,278 @@
+[
+  {
+    "id": "CVE-2022-3602",
+    "summary": "X.509 Email Address 4-byte Buffer Overflow (punycode decoding). A buffer overrun can be triggered in X.509 certificate verification, specifically in name constraint checking for email addresses (punycode decode). Affects OpenSSL 3.0.0 through 3.0.6; fixed in 3.0.7 (2022-11-01). https://www.openssl.org/news/secadv/20221101.txt",
+    "severity": [
+      {
+        "type": "CVSS_V3",
+        "score": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H"
+      }
+    ],
+    "database_specific": {
+      "cvss_base_score": 7.5,
+      "exploit_maturity": "poc"
+    },
+    "affected": [
+      {
+        "package": {
+          "ecosystem": "Debian:12",
+          "name": "openssl"
+        },
+        "ranges": [
+          {
+            "type": "ECOSYSTEM",
+            "events": [
+              {
+                "introduced": "3.0.0"
+              },
+              {
+                "fixed": "3.0.7"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "package": {
+          "ecosystem": "Ubuntu:22.04:LTS",
+          "name": "openssl"
+        },
+        "ranges": [
+          {
+            "type": "ECOSYSTEM",
+            "events": [
+              {
+                "introduced": "3.0.0"
+              },
+              {
+                "fixed": "3.0.2-0ubuntu1.7"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "CVE-2022-3786",
+    "summary": "X.509 Email Address Variable Length Buffer Overflow (punycode decoding). A buffer overrun can be triggered in X.509 certificate verification, specifically in name constraint checking for email addresses (punycode decode), writing an arbitrary number of '.' characters onto the stack. Affects OpenSSL 3.0.0 through 3.0.6; fixed in 3.0.7 (2022-11-01). https://www.openssl.org/news/secadv/20221101.txt",
+    "severity": [
+      {
+        "type": "CVSS_V3",
+        "score": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H"
+      }
+    ],
+    "database_specific": {
+      "cvss_base_score": 7.5,
+      "exploit_maturity": "poc"
+    },
+    "affected": [
+      {
+        "package": {
+          "ecosystem": "Debian:12",
+          "name": "openssl"
+        },
+        "ranges": [
+          {
+            "type": "ECOSYSTEM",
+            "events": [
+              {
+                "introduced": "3.0.0"
+              },
+              {
+                "fixed": "3.0.7"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "package": {
+          "ecosystem": "Ubuntu:22.04:LTS",
+          "name": "openssl"
+        },
+        "ranges": [
+          {
+            "type": "ECOSYSTEM",
+            "events": [
+              {
+                "introduced": "3.0.0"
+              },
+              {
+                "fixed": "3.0.2-0ubuntu1.7"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "CVE-2018-25032",
+    "summary": "zlib memory corruption in deflate (deflate.c) when using Z_FIXED. Affects zlib up to and including 1.2.11; fixed in 1.2.12 (2022-03-27). Debian/Ubuntu ship the deflate fix under the binary package zlib1g. https://www.openwall.com/lists/oss-security/2022/03/25/1",
+    "severity": [
+      {
+        "type": "CVSS_V3",
+        "score": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H"
+      }
+    ],
+    "database_specific": {
+      "cvss_base_score": 7.5,
+      "exploit_maturity": "poc"
+    },
+    "affected": [
+      {
+        "package": {
+          "ecosystem": "Debian:12",
+          "name": "zlib1g"
+        },
+        "ranges": [
+          {
+            "type": "ECOSYSTEM",
+            "events": [
+              {
+                "introduced": "0"
+              },
+              {
+                "fixed": "1.2.12"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "package": {
+          "ecosystem": "Ubuntu:20.04:LTS",
+          "name": "zlib1g"
+        },
+        "ranges": [
+          {
+            "type": "ECOSYSTEM",
+            "events": [
+              {
+                "introduced": "0"
+              },
+              {
+                "fixed": "1:1.2.11.dfsg-2ubuntu1.3"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "CVE-2023-38545",
+    "summary": "curl SOCKS5 heap buffer overflow: a malicious server (or a redirect to one) combined with a slow/crafted SOCKS5 handshake can overflow a heap buffer when curl is configured to use a SOCKS5 proxy with hostname resolution done by the proxy. Affects libcurl 7.69.0 through 8.3.0; fixed in 8.4.0 (2023-10-11). https://curl.se/docs/CVE-2023-38545.html",
+    "severity": [
+      {
+        "type": "CVSS_V3",
+        "score": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"
+      }
+    ],
+    "database_specific": {
+      "cvss_base_score": 9.8,
+      "exploit_maturity": "functional"
+    },
+    "affected": [
+      {
+        "package": {
+          "ecosystem": "Debian:12",
+          "name": "curl"
+        },
+        "ranges": [
+          {
+            "type": "ECOSYSTEM",
+            "events": [
+              {
+                "introduced": "7.69.0"
+              },
+              {
+                "fixed": "8.4.0"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "package": {
+          "ecosystem": "Ubuntu:22.04:LTS",
+          "name": "curl"
+        },
+        "ranges": [
+          {
+            "type": "ECOSYSTEM",
+            "events": [
+              {
+                "introduced": "7.69.0"
+              },
+              {
+                "fixed": "7.81.0-1ubuntu1.14"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "CVE-2021-3156",
+    "summary": "Sudo 'Baron Samedit' heap-based buffer overflow (off-by-one) in sudoers argument parsing. Any local user can gain root without authentication. Affects sudo 1.8.2 through 1.8.31p2 and 1.9.0 through 1.9.5p1; fixed in 1.9.5p2 (2021-01-26). Listed in the CISA Known Exploited Vulnerabilities catalog (dateAdded 2022-04-06). https://www.qualys.com/2021/01/26/cve-2021-3156/baron-samedit-heap-based-overflow-sudo.txt",
+    "severity": [
+      {
+        "type": "CVSS_V3",
+        "score": "CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H"
+      }
+    ],
+    "database_specific": {
+      "cvss_base_score": 7.8,
+      "exploit_maturity": "weaponized"
+    },
+    "affected": [
+      {
+        "package": {
+          "ecosystem": "Debian:12",
+          "name": "sudo"
+        },
+        "ranges": [
+          {
+            "type": "ECOSYSTEM",
+            "events": [
+              {
+                "introduced": "1.8.2"
+              },
+              {
+                "fixed": "1.8.32"
+              },
+              {
+                "introduced": "1.9.0"
+              },
+              {
+                "fixed": "1.9.5p2"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "package": {
+          "ecosystem": "Ubuntu:20.04:LTS",
+          "name": "sudo"
+        },
+        "ranges": [
+          {
+            "type": "ECOSYSTEM",
+            "events": [
+              {
+                "introduced": "1.8.2"
+              },
+              {
+                "fixed": "1.8.31-1ubuntu1.2"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+]

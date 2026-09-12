@@ -88,6 +88,7 @@ fn unknown_enrichment() -> Enrichment {
         kev: false,
         exploit_maturity: torda_findings::ExploitMaturity::None,
         vex: torda_findings::VexStatus::Unknown,
+        feed_version: None,
     }
 }
 
@@ -109,6 +110,7 @@ mod tests {
             kev,
             exploit_maturity: m,
             vex,
+            feed_version: None,
         }
     }
     fn ctx(internet: bool, crit: Criticality, controls: bool) -> AssetContext {

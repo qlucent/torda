@@ -1,0 +1,28 @@
+{
+  "feed_version": "2026-09-12T00:00:00Z",
+  "created_at": 1789195883177,
+  "source": "qlucent-community",
+  "tier": "community",
+  "entries": [
+    {
+      "name": "osv-bundle.json",
+      "sha256": "04f489378292588819c9f5f08a033c45ed839677c02b1f2193aa19f93e271435",
+      "kind": "osv"
+    },
+    {
+      "name": "nvd-bundle.json",
+      "sha256": "4f1530fa9e64f6c7e1070ae3a9d0f43f1d363457e26bbf54c29be09c3c4646d2",
+      "kind": "nvd"
+    },
+    {
+      "name": "epss-sample.csv",
+      "sha256": "89a00cf1b48d72b9966e535f61ba8ef6752a444e9a0b09e85e933e54d8b88b79",
+      "kind": "epss"
+    },
+    {
+      "name": "kev-sample.json",
+      "sha256": "dbd0816f128627edafcc466be5f2d0d0ac86c444fa96bcb0781eeeb5456bea61",
+      "kind": "kev"
+    }
+  ]
+}

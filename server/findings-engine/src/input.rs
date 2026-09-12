@@ -65,6 +65,7 @@ mod tests {
             kev: true,
             exploit_maturity: ExploitMaturity::Weaponized,
             vex: VexStatus::Affected,
+            feed_version: None,
         }
     }
 

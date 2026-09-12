@@ -1,0 +1,22 @@
+[package]
+name = "torda-feed-live"
+edition.workspace = true
+# FSL-1.1-ALv2 (source-available, non-compete, -> Apache-2.0 after 2 years), NOT the
+# Apache-2.0 workspace default: the enterprise live-feed source + entitlement issuer is
+# the moat. Depends on the Apache `torda-feed` (FSL -> Apache is allowed). See LICENSING.md.
+license-file = "LICENSE"
+version.workspace = true
+repository.workspace = true
+description = "Enterprise (paid) live feed source for Torda: an entitlement-gated FeedSource plus the Ed25519 entitlement-token issuer/verifier. Implements torda-feed's FeedSource behind an offline-verified license token."
+
+[lib]
+name = "torda_feed_live"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+ed25519-dalek = { workspace = true }
+hex = { workspace = true }
+torda-feed = { path = "../../crates/feed" }
