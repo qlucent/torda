@@ -44,6 +44,7 @@ pub fn default_enrichment() -> MapEnrichment {
             kev: false,
             exploit_maturity: ExploitMaturity::Functional,
             vex: VexStatus::Affected,
+            feed_version: None,
         },
     );
     m.insert(
@@ -56,6 +57,7 @@ pub fn default_enrichment() -> MapEnrichment {
             kev: true,
             exploit_maturity: ExploitMaturity::Weaponized,
             vex: VexStatus::Affected,
+            feed_version: None,
         },
     );
     m.insert(
@@ -68,6 +70,7 @@ pub fn default_enrichment() -> MapEnrichment {
             kev: false,
             exploit_maturity: ExploitMaturity::Functional,
             vex: VexStatus::NotAffected,
+            feed_version: None,
         },
     );
     MapEnrichment(m)

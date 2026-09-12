@@ -98,6 +98,15 @@ pub struct Enrichment {
     pub kev: bool,
     pub exploit_maturity: ExploitMaturity,
     pub vex: VexStatus,
+    /// The feed snapshot version these values came from (e.g.
+    /// `"2026-09-12T00:00:00Z"`), stamped by a feed-store-backed
+    /// [`crate`]-external `EnrichmentSource` so every score cites which feed
+    /// scored it. `None` when the enrichment came from an unversioned source or
+    /// no feed at all. `#[serde(default)]` keeps findings persisted before this
+    /// field existed loadable, and it is NEVER read by the score — it is
+    /// explainability provenance, exactly like `Provenance.reported_severity`.
+    #[serde(default)]
+    pub feed_version: Option<String>,
 }
 
 /// Asset-context inputs to scoring.

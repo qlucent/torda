@@ -27,6 +27,9 @@ serde_json.workspace = true
 torda-ocsf = { path = "../../crates/ocsf" }
 torda-findings = { path = "../../crates/findings" }
 torda-findings-engine = { path = "../findings-engine" }
+# Apache feed layer: BundledEnrichment can load from a verified feed store and
+# stamp its feed_version onto findings. FSL -> Apache dep is fine.
+torda-feed = { path = "../../crates/feed" }
 torda-compliance = { path = "../../crates/compliance" }
 torda-remediation = { path = "../remediation" }
 torda-control-plane = { path = "../control-plane" }

@@ -93,6 +93,7 @@ fn detection(assets: &dyn AssetContextSource) -> Finding {
             kev: false,
             exploit_maturity: ExploitMaturity::None,
             vex: VexStatus::Affected,
+            feed_version: None,
         },
         asset_ctx: ctx,
         score,

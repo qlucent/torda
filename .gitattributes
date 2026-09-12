@@ -2,3 +2,10 @@
 # checked out with CRLF fails on Linux with "bad interpreter".
 * text=auto
 *.sh text eol=lf
+
+# Feed bundles are signed, byte-exact artifacts. Their content files, manifest,
+# and detached signature must be identical on every platform: end-of-line
+# normalization (CRLF<->LF) would change the bytes and break both the manifest's
+# per-file SHA-256 digests and the manifest signature. Treat them as binary.
+crates/feed/sample-bundle/** -text
+server/feed-live/enterprise-bundle/** -text

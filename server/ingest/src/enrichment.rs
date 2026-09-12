@@ -113,6 +113,11 @@ pub struct BundledEnrichment {
     cvss: HashMap<String, CvssEvidence>,
     epss: HashMap<String, EpssRow>,
     kev: HashSet<String>,
+    /// The feed snapshot version these snapshots came from, stamped into every
+    /// returned [`Enrichment`] for explainability. `None` for the plain
+    /// directory/snapshot loaders (unversioned); `Some` when loaded from a
+    /// verified feed store (see [`BundledEnrichment::load_from_feed_store`]).
+    feed_version: Option<String>,
 }
 
 impl BundledEnrichment {
@@ -156,7 +161,54 @@ impl BundledEnrichment {
         let cvss = parse_cvss(osv_json).context("parsing CVSS from the OSV snapshot")?;
         let epss = parse_epss(epss_csv).context("parsing the EPSS snapshot")?;
         let kev = parse_kev(kev_json).context("parsing the KEV snapshot")?;
-        Ok(Self { cvss, epss, kev })
+        Ok(Self {
+            cvss,
+            epss,
+            kev,
+            feed_version: None,
+        })
+    }
+
+    /// Tag every [`Enrichment`] this source returns with a feed snapshot
+    /// version, so a finding scored from it cites which feed produced its
+    /// inputs. Builder form for the plain loaders; the feed-store loader sets
+    /// it automatically.
+    pub fn with_feed_version(mut self, feed_version: Option<String>) -> Self {
+        self.feed_version = feed_version;
+        self
+    }
+
+    /// The feed snapshot version stamped into returned enrichments, if any.
+    pub fn feed_version(&self) -> Option<&str> {
+        self.feed_version.as_deref()
+    }
+
+    /// Load enrichment from a **verified** feed store: reads the store's active
+    /// content directory (the osv/epss/kev/nvd snapshots the installed bundle
+    /// carried) via [`load_from_dir`](Self::load_from_dir) and stamps the
+    /// store's active `feed_version` into every returned [`Enrichment`].
+    ///
+    /// The store must already hold a verified bundle (install verifies the
+    /// signature + per-file digests); this only reads what verification
+    /// admitted. A store with no installed feed is a hard error (fail-closed) —
+    /// the caller should fall back to an unenriched run explicitly, not
+    /// silently score against nothing.
+    pub fn load_from_feed_store(store: &torda_feed::FeedStore) -> anyhow::Result<Self> {
+        let version = store.active_version().ok_or_else(|| {
+            anyhow::anyhow!(
+                "feed store {} has no installed feed; install a bundle first",
+                store.root().display()
+            )
+        })?;
+        let content = store.content_dir();
+        Self::load_from_dir(&content)
+            .with_context(|| {
+                format!(
+                    "loading enrichment from feed store content {}",
+                    content.display()
+                )
+            })
+            .map(|s| s.with_feed_version(Some(version)))
     }
 }
 
@@ -189,6 +241,8 @@ impl EnrichmentSource for BundledEnrichment {
             // We only hold evidence for a CVE we matched against a genuinely
             // installed, in-range vulnerable version → the asset IS affected.
             vex: VexStatus::Affected,
+            // Explainability: which feed snapshot supplied these inputs.
+            feed_version: self.feed_version.clone(),
         })
     }
 }

@@ -1,0 +1,27 @@
+[package]
+name = "torda-feed"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+repository.workspace = true
+description = "Signed, versioned vulnerability/threat-intel enrichment feed: the open bundle format, signature + digest verification, atomic local store, and CLI shared by the community (static) and enterprise (live) tiers."
+
+[lib]
+name = "torda_feed"
+path = "src/lib.rs"
+
+# Operator tool: install/verify a feed bundle into a store and report status.
+# Hand-rolled arg parsing (no clap), matching the `torda` agent binary.
+[[bin]]
+name = "torda-feed"
+path = "src/bin/torda-feed.rs"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+ed25519-dalek = { workspace = true }
+hex = { workspace = true }
+# SHA-256 over content files via the same audited primitive transport-tls uses
+# (rustls' ring provider) — not hand-rolled.
+ring = "0.17"

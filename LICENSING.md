@@ -24,8 +24,8 @@ the backend core is protected from resale.
 
 | License | Crates |
 | --- | --- |
-| **Apache-2.0** ([`LICENSE`](LICENSE)) | the agent (`torda`) and everything it links: `torda-core`, `torda-substrate`, `torda-ocsf`, `torda-findings`, `torda-compliance`, all `torda-mod-*` modules, `torda-remediation`, `torda-control-plane`, `torda-transport`, `torda-transport-tls`, and the kernel-side eBPF crates. The collector bundle and dashboards under `deploy/` are Apache-2.0 too. |
-| **FSL-1.1-ALv2** ([`LICENSE-FSL-1.1.md`](LICENSE-FSL-1.1.md)) | `torda-findings-engine` (`server/findings-engine`) and `torda-ingest` (`server/ingest`) — the Findings Engine + ingest/scoring pipeline — and `torda-control-server` (`server/control-server`) — the orchestration/issuer half of the control channel. |
+| **Apache-2.0** ([`LICENSE`](LICENSE)) | the agent (`torda`) and everything it links: `torda-core`, `torda-substrate`, `torda-ocsf`, `torda-findings`, `torda-compliance`, all `torda-mod-*` modules, `torda-remediation`, `torda-control-plane`, `torda-transport`, `torda-transport-tls`, and the kernel-side eBPF crates. The open feed-format crate `torda-feed` (`crates/feed`) — the signed bundle format, verification, local store, and CLI — is Apache-2.0 too, as is the collector bundle and dashboards under `deploy/`. |
+| **FSL-1.1-ALv2** ([`LICENSE-FSL-1.1.md`](LICENSE-FSL-1.1.md)) | `torda-findings-engine` (`server/findings-engine`) and `torda-ingest` (`server/ingest`) — the Findings Engine + ingest/scoring pipeline; `torda-control-server` (`server/control-server`) — the orchestration/issuer half of the control channel; and `torda-feed-live` (`server/feed-live`) — the enterprise (paid) live-feed source + entitlement issuer. |
 
 The boundary is dependency-clean: nothing Apache-licensed depends on an FSL crate,
 so the agent is genuinely Apache-only.
@@ -58,6 +58,27 @@ genuine Apache-only build; the only normal consumer is the FSL `torda-ingest`.
 `torda-remediation`, `torda-control-plane`, and `torda-transport*` still contain some
 server-adjacent code that remains Apache because the agent links it; further carving of
 orchestration-only surface into FSL crates can follow the same client/issuer boundary.
+
+## Feed tiering
+
+Enrichment (the CVSS / EPSS / KEV / advisory evidence the Findings Engine scores from)
+is delivered as a **feed**, split along the same open-core seam:
+
+- **Community** — a static, periodically-published, **signed** bundle consumed by the
+  Apache `torda-feed` crate. The bundle format, its Ed25519 signature + per-file digest
+  verification, the local store, and the `torda-feed` CLI are all Apache-2.0: anyone can
+  produce, publish, verify, and consume a feed, and side-load one offline for air-gapped
+  hosts. This is the open format, like the OCSF envelope the agent speaks.
+- **Enterprise** — a live, curated source (`torda-feed-live`, FSL) that implements the
+  same `FeedSource` trait behind a signed **entitlement token**, verified offline against
+  the issuer's public key. The bundle **signature** (content integrity, verified by the
+  Apache crate) is deliberately separate from the **entitlement** (access, enforced by the
+  FSL crate): a valid bundle you are not entitled to is still refused, and either tier
+  installs through the same verified store.
+
+The dependency direction stays clean: `torda-feed-live` (FSL) depends on `torda-feed`
+(Apache), never the reverse, and the agent links neither — feed consumption lives on the
+findings/ingest (backend) side.
 
 ## Contributing
 

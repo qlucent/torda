@@ -1,0 +1,19 @@
+{
+  "title": "CISA Catalog of Known Exploited Vulnerabilities (bundled subset)",
+  "catalogVersion": "2026.07.16",
+  "dateReleased": "2026-07-16T17:00:15.6845Z",
+  "_note": "REAL subset of the CISA KEV catalog, verified against https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json (catalogVersion 2026.07.16). Of the CVEs in osv-bundle.json, only CVE-2021-3156 (sudo Baron Samedit) is genuinely KEV-listed; the openssl/zlib/curl CVEs are NOT in KEV and are deliberately omitted here so the loader marks kev=false for them. A real deployment syncs the full catalog (VD-4).",
+  "vulnerabilities": [
+    {
+      "cveID": "CVE-2021-3156",
+      "vendorProject": "Sudo",
+      "product": "Sudo",
+      "vulnerabilityName": "Sudo Heap-Based Buffer Overflow Vulnerability",
+      "dateAdded": "2022-04-06",
+      "shortDescription": "Sudo contains an off-by-one/heap-based buffer overflow (Baron Samedit) that allows a local user to escalate privileges to root.",
+      "requiredAction": "Apply updates per vendor instructions.",
+      "dueDate": "2022-04-27",
+      "knownRansomwareCampaignUse": "Unknown"
+    }
+  ]
+}

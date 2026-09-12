@@ -119,6 +119,7 @@ mod tests {
             kev: false,
             exploit_maturity: m,
             vex,
+            feed_version: None,
         }
     }
     fn ctx(internet: bool, crit: Criticality, controls: bool) -> AssetContext {

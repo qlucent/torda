@@ -171,6 +171,7 @@ mod tests {
                 kev: false,
                 exploit_maturity: ExploitMaturity::Functional,
                 vex: VexStatus::Affected,
+                feed_version: None,
             },
         );
         m.insert(
@@ -183,6 +184,7 @@ mod tests {
                 kev: false,
                 exploit_maturity: ExploitMaturity::Functional,
                 vex: VexStatus::NotAffected,
+                feed_version: None,
             },
         );
         MapEnrichment(m)
