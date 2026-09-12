@@ -35,12 +35,13 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rustls::pki_types::ServerName;
 
-use torda_control_plane::{CommandOutcome, CommandSigner, ControlPlaneClient, Ed25519Verifier};
+use torda_control_plane::{CommandOutcome, CommandSigner, Ed25519Verifier};
+use torda_control_server::{
+    client_config_from_files, connect, ControlPlaneClient, TlsClientTransport,
+};
 use torda_remediation::action::{AssetSelector, CanarySpec, Method, RemediationAction, VerifySpec};
 use torda_remediation::control::{CommandKind, ControlCommand};
-use torda_transport_tls::{
-    client_config_from_files, connect, generate_test_pki, write_pki_to_pem, CertFilePaths,
-};
+use torda_transport_tls::{generate_test_pki, write_pki_to_pem, CertFilePaths};
 
 use torda_core::{
     Module, ModuleCtx, OcsfEmitter, ResourceBudget, ResourceGovernor, ResourceSampler,
@@ -200,7 +201,7 @@ fn connect_client(
     addr: std::net::SocketAddr,
     paths: &CertFilePaths,
     client_leaf: &rustls::pki_types::CertificateDer<'static>,
-) -> (torda_transport_tls::TlsClientTransport, String) {
+) -> (TlsClientTransport, String) {
     let client_cfg = client_config_from_files(&[&paths.ca], &paths.client_chain, &paths.client_key)
         .expect("client cfg from files");
     let stream = TcpStream::connect(addr).expect("client TCP connect");
@@ -212,10 +213,7 @@ fn connect_client(
 /// Best-effort: does an already-connected client obtain an `Applied` outcome for an
 /// alice-signed Draft? Used to prove a rejected peer is served NOTHING even if its own
 /// `connect` optimistically returned `Ok` under TLS 1.3.
-fn client_gets_applied(
-    transport: &mut torda_transport_tls::TlsClientTransport,
-    session: &str,
-) -> bool {
+fn client_gets_applied(transport: &mut TlsClientTransport, session: &str) -> bool {
     let alice = CommandSigner::from_seed("alice", ALICE_SEED);
     let agent_id = CommandSigner::from_seed("agent-1", AGENT_SEED);
     let mut server_v = Ed25519Verifier::new();

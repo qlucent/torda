@@ -9,12 +9,13 @@
 //!
 //! ## What the handshake gates
 //!
-//! [`accept`] (agent side) and [`connect`] (issuer side) complete the TLS handshake
-//! **before returning a transport**. Because the configs from this crate require mutual
-//! certificate authentication, an untrusted or absent peer certificate makes the
-//! handshake fail and the constructor returns an [`io::Error`] — *no application frame
-//! is ever exchanged with an unauthenticated peer*. Both sides also derive a `session`
-//! id bound to the authenticated client identity (see [`session_from_cert`]).
+//! [`accept`] (agent side) completes the TLS handshake **before returning a transport**.
+//! Because the configs from this crate require mutual certificate authentication, an
+//! untrusted or absent peer certificate makes the handshake fail and the constructor returns
+//! an [`io::Error`] — *no application frame is ever exchanged with an unauthenticated peer*.
+//! The session id is derived from the authenticated client identity (see
+//! [`session_from_cert`]). The ISSUER-side counterpart (`connect` + the client carrier) lives
+//! in the FSL `torda-control-server` crate and derives the SAME cert-bound id.
 //!
 //! ## Fallibility
 //!
@@ -27,8 +28,8 @@ use std::io::{self, Read, Write};
 use std::net::TcpStream;
 use std::sync::Arc;
 
-use rustls::pki_types::{CertificateDer, ServerName};
-use rustls::{ClientConfig, ClientConnection, ServerConfig, ServerConnection, StreamOwned};
+use rustls::pki_types::CertificateDer;
+use rustls::{ServerConfig, ServerConnection, StreamOwned};
 
 use torda_transport::{decode_frame, encode_frame, Transport};
 
@@ -129,24 +130,6 @@ impl Transport for TlsServerTransport {
     }
 }
 
-/// The **issuer-side** control-channel carrier: a mutual-TLS `TcpStream` presenting the
-/// client certificate and having verified the server certificate during the handshake.
-/// Constructed by [`connect`]. Implements [`torda_transport::Transport`].
-pub struct TlsClientTransport {
-    stream: StreamOwned<ClientConnection, TcpStream>,
-    inbuf: Vec<u8>,
-}
-
-impl Transport for TlsClientTransport {
-    fn send(&mut self, frame: &[u8]) -> io::Result<()> {
-        send_framed(&mut self.stream, frame)
-    }
-
-    fn recv(&mut self) -> io::Result<Option<Vec<u8>>> {
-        recv_framed(&mut self.stream, &mut self.inbuf)
-    }
-}
-
 /// **Agent side.** Take an accepted `TcpStream`, complete the mutual-TLS handshake with
 /// `cfg` (which REQUIRES a CA-signed client cert), and return the carrier plus the
 /// session id derived from the authenticated client certificate.
@@ -170,47 +153,6 @@ pub fn accept(
     let stream = StreamOwned::new(conn, stream);
     Ok((
         TlsServerTransport {
-            stream,
-            inbuf: Vec::new(),
-        },
-        session,
-    ))
-}
-
-/// **Issuer side.** Take a connected `TcpStream`, complete the mutual-TLS handshake with
-/// `cfg` (verifying the server cert against the trusted CA and presenting the client
-/// cert), and return the carrier plus the session id derived from `client_leaf` — the
-/// client's OWN leaf certificate, hashed identically to the way [`accept`] hashes the
-/// copy it received, so both ends agree on the session id.
-///
-/// The handshake is driven to completion HERE: a server cert that does not chain to the
-/// trusted CA fails verification and surfaces as an `Err` before any application frame.
-///
-/// ## Deviation from the sketched signature
-///
-/// The task sketch showed `connect(stream, cfg, server_name)`. rustls does not expose the
-/// client certificate a `ClientConfig`/`ClientConnection` presents, so — to compute the
-/// same cert-bound session id the agent derives from the received client leaf — the
-/// caller passes that leaf explicitly as `client_leaf`. This keeps session derivation
-/// bound to the authenticated CLIENT identity without hand-reaching into rustls internals.
-pub fn connect(
-    mut stream: TcpStream,
-    cfg: Arc<ClientConfig>,
-    server_name: ServerName<'static>,
-    client_leaf: &CertificateDer<'_>,
-) -> io::Result<(TlsClientTransport, String)> {
-    let mut conn = ClientConnection::new(cfg, server_name).map_err(to_io)?;
-    // Complete the handshake explicitly. A server cert that does not chain to the trusted
-    // CA fails verification inside rustls and complete_io returns the io::Error HERE.
-    while conn.is_handshaking() {
-        conn.complete_io(&mut stream)?;
-    }
-    // Bind the session id to the client's OWN leaf — identical to what the agent computes
-    // from the client leaf it received, so both ends independently agree.
-    let session = session_from_cert(client_leaf.as_ref());
-    let stream = StreamOwned::new(conn, stream);
-    Ok((
-        TlsClientTransport {
             stream,
             inbuf: Vec::new(),
         },

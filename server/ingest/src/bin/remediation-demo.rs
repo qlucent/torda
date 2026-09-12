@@ -162,7 +162,7 @@ fn exec_action(id: &str) -> RemediationAction {
 /// passed to `serve_one` only because the signature demands it; lifecycle frames never read it.
 #[allow(clippy::too_many_arguments)]
 fn approve_over_wire(
-    client: &mut torda_control_plane::ControlPlaneClient,
+    client: &mut torda_control_server::ControlPlaneClient,
     ct: &mut DuplexTransport,
     at: &mut DuplexTransport,
     lp: &mut torda_control_plane::AgentControlLoop<'_>,
@@ -565,7 +565,7 @@ fn main() {
     let mut guard = ReplayGuard::new();
     guard.open_session("sess-A", 0); // admits seq >= 1
     let mut b3 = Bridge::new(VecAuditSink::default());
-    let mut corr = torda_control_plane::ResultCorrelator::new();
+    let mut corr = torda_control_server::ResultCorrelator::new();
 
     // Deterministically (re)build a genuine alice-signed Draft on ("sess-A", seq).
     // Rebuilding with identical inputs reproduces the identical ed25519 signature —
@@ -729,7 +729,7 @@ fn main() {
     // replay-guarded wire entry point: handle_fresh -> dispatch_fresh only); the issuer
     // side runs a ControlPlaneClient that signs commands and accepts only correlated,
     // agent-signed results. A control SESSION scopes the freshness token on the wire.
-    let session = torda_control_plane::establish_session("host-1", 1);
+    let session = torda_control_server::establish_session("host-1", 1);
     println!("    established control session: {session}  (stub id — the real mTLS-bound handshake is P3b-7)");
 
     let mut b4 = Bridge::new(VecAuditSink::default());
@@ -752,7 +752,7 @@ fn main() {
     let client_signer = torda_control_plane::CommandSigner::from_seed("alice", [3u8; 32]);
     let mut server4 = torda_control_plane::Ed25519Verifier::new();
     server4.trust("agent-1", agent.verifying_key()); // return-leg trust for the agent key
-    let mut client = torda_control_plane::ControlPlaneClient::new(client_signer, server4);
+    let mut client = torda_control_server::ControlPlaneClient::new(client_signer, server4);
     let (mut client_t, mut agent_t) = DuplexTransport::pair();
 
     // Build a benign, authorized Draft on (session, seq). UNSIGNED — signed by the
@@ -848,7 +848,7 @@ fn main() {
     // Reuses the [1] command `verifier` (trusts alice/bob) + `policy` (alice=Operator, bob=Approver)
     // and the [5] `agent` identity. EXECUTION commands (Canary/Rollout) now cross the SAME
     // authn -> freshness -> authz -> replay gate as authoring — proven over the wire.
-    let session8 = torda_control_plane::establish_session("host-1", 8);
+    let session8 = torda_control_server::establish_session("host-1", 8);
     println!("    established control session: {session8}");
 
     // -- (1) Full lifecycle INCLUDING execution, every stage signed over the wire ------------------
@@ -867,7 +867,7 @@ fn main() {
     let mut server8 = torda_control_plane::Ed25519Verifier::new();
     server8.trust("agent-1", agent.verifying_key());
     // The client signs with alice's key (Operator authors + executes); a distinct bob key approves.
-    let mut client8 = torda_control_plane::ControlPlaneClient::new(
+    let mut client8 = torda_control_server::ControlPlaneClient::new(
         torda_control_plane::CommandSigner::from_seed("alice", [3u8; 32]),
         server8,
     );
@@ -1002,7 +1002,7 @@ fn main() {
     );
     let mut serverf = torda_control_plane::Ed25519Verifier::new();
     serverf.trust("agent-1", agent.verifying_key());
-    let mut clientf = torda_control_plane::ControlPlaneClient::new(
+    let mut clientf = torda_control_server::ControlPlaneClient::new(
         torda_control_plane::CommandSigner::from_seed("alice", [3u8; 32]),
         serverf,
     );
@@ -1060,7 +1060,7 @@ fn main() {
     );
     let mut serveru = torda_control_plane::Ed25519Verifier::new();
     serveru.trust("agent-1", agent.verifying_key());
-    let mut clientu = torda_control_plane::ControlPlaneClient::new(
+    let mut clientu = torda_control_server::ControlPlaneClient::new(
         torda_control_plane::CommandSigner::from_seed("alice", [3u8; 32]),
         serveru,
     );
@@ -1131,7 +1131,7 @@ fn main() {
     policy9.assign("alice", torda_remediation::control::Role::Operator);
     policy9.assign("bob", torda_remediation::control::Role::Approver);
     policy9.assign("carol", torda_remediation::control::Role::Responder);
-    let session9 = torda_control_plane::establish_session("host-1", 9);
+    let session9 = torda_control_server::establish_session("host-1", 9);
     println!("    established control session: {session9}   (window [100,200]; FakeClock drives release — deterministic, no wall clock)");
 
     // A scheduled Canary frame on (session9, seq) carrying a SIGNED window, UNSIGNED (signed by the caller).
@@ -1160,7 +1160,7 @@ fn main() {
     );
     let mut server9 = torda_control_plane::Ed25519Verifier::new();
     server9.trust("agent-1", agent.verifying_key());
-    let mut client9 = torda_control_plane::ControlPlaneClient::new(
+    let mut client9 = torda_control_server::ControlPlaneClient::new(
         torda_control_plane::CommandSigner::from_seed("alice", [3u8; 32]),
         server9,
     );
@@ -1297,7 +1297,7 @@ fn main() {
     );
     let mut servera = torda_control_plane::Ed25519Verifier::new();
     servera.trust("agent-1", agent.verifying_key());
-    let mut clienta = torda_control_plane::ControlPlaneClient::new(
+    let mut clienta = torda_control_server::ControlPlaneClient::new(
         torda_control_plane::CommandSigner::from_seed("alice", [3u8; 32]),
         servera,
     );
@@ -1397,7 +1397,7 @@ fn main() {
     );
     let mut servere = torda_control_plane::Ed25519Verifier::new();
     servere.trust("agent-1", agent.verifying_key());
-    let mut cliente = torda_control_plane::ControlPlaneClient::new(
+    let mut cliente = torda_control_server::ControlPlaneClient::new(
         torda_control_plane::CommandSigner::from_seed("alice", [3u8; 32]),
         servere,
     );

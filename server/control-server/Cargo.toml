@@ -1,0 +1,40 @@
+[package]
+name = "torda-control-server"
+edition.workspace = true
+# FSL-1.1-ALv2 (source-available, non-compete, -> Apache-2.0 after 2 years), NOT the
+# Apache-2.0 workspace default: this crate is the orchestration/issuer half of the
+# control channel (the operator side that connects in and signs/issues commands). The
+# shipped `torda` agent is the mTLS SERVER and links ONLY the Apache halves, so it never
+# takes a normal dependency on this crate. See LICENSING.md.
+license-file = "LICENSE"
+version.workspace = true
+repository.workspace = true
+
+[lib]
+name = "torda_control_server"
+path = "src/lib.rs"
+
+[dependencies]
+# Apache agent-linked crates this FSL crate builds on (FSL -> Apache is allowed; the
+# reverse is not — no Apache crate may take a normal dep on torda-control-server).
+torda-control-plane = { path = "../control-plane" }
+torda-transport = { path = "../transport" }
+torda-transport-tls = { path = "../transport-tls" }
+torda-remediation = { path = "../remediation" }
+serde_json = { workspace = true }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+
+[dev-dependencies]
+# Integration tests + examples exercise the full client<->server control channel, so they
+# pull the Apache halves (server config/loop) and the agent itself. Dev-deps are NOT shipped
+# and never appear in `cargo tree -p torda -e no-dev`, so they do not cross the FSL boundary.
+torda = { path = "../../crates/agent" }
+torda-core = { path = "../../crates/core" }
+torda-ocsf = { path = "../../crates/ocsf" }
+torda-substrate = { path = "../../crates/substrate" }
+torda-mod-asset = { path = "../../crates/modules/asset" }
+anyhow = { workspace = true }
+hex = { workspace = true }
+toml = { workspace = true }
+tokio = { workspace = true }
+rcgen = "0.13"

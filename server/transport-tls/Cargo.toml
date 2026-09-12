@@ -24,9 +24,7 @@ rcgen = "0.13"
 # tree via rustls' ring provider; used here directly so the hash is audited, not hand-rolled.
 ring = "0.17"
 
-[dev-dependencies]
-torda-control-plane = { path = "../control-plane" }
-torda-remediation = { path = "../remediation" }
-# The stub orchestrator `Executor` in mtls_channel.rs implements `Executor`, whose methods
-# return `anyhow::Result<()>`; anyhow is already a first-party workspace dependency.
-anyhow.workspace = true
+# No [dev-dependencies]: the mTLS client<->server round-trip integration tests (which needed
+# the FSL issuer `ControlPlaneClient` + `connect`) now live in `server/control-server/tests`,
+# so this Apache crate keeps only its in-crate unit tests and takes no dependency — dev or
+# otherwise — on the FSL surface. The remaining unit tests use only rustls + this crate.

@@ -50,12 +50,12 @@ mod certs;
 mod reload;
 mod stream;
 pub use certs::{
-    client_config_from_files, load_certs, load_crls, load_crls_from_files, load_private_key,
+    load_certs, load_crls, load_crls_from_files, load_private_key, load_root_store,
     read_capped_cert_file, server_config_from_files, server_config_from_files_with_crl,
     write_pki_to_der, write_pki_to_pem, CertFilePaths, MAX_CERT_FILE_BYTES,
 };
 pub use reload::{CertFileSpec, ReloadableServerConfig};
-pub use stream::{accept, connect, session_from_cert, TlsClientTransport, TlsServerTransport};
+pub use stream::{accept, session_from_cert, TlsServerTransport};
 
 use rustls::pki_types::{
     CertificateDer, CertificateRevocationListDer, PrivateKeyDer, PrivatePkcs8KeyDer,

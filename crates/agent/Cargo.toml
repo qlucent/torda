@@ -5,8 +5,8 @@ license.workspace = true
 version.workspace = true
 description = "OCSF-native endpoint security agent: one shared eBPF/ETW probe set feeding thin detection modules, with cross-sensor attack-chain correlation and fix-first vulnerability findings."
 repository.workspace = true
-# With a second [[bin]] (agent-e2e-demo) present, keep `cargo run -p torda` resolving
-# to the agent binary exactly as before.
+# With the demo [[bin]]s below present, keep `cargo run -p torda` resolving to the agent
+# binary exactly as before.
 default-run = "torda"
 
 [features]
@@ -27,11 +27,6 @@ path = "src/lib.rs"
 [[bin]]
 name = "torda"
 path = "src/main.rs"
-
-# P3c-1 LIVE end-to-end checkpoint: one process = OCSF telemetry + mTLS control channel.
-[[bin]]
-name = "agent-e2e-demo"
-path = "src/bin/agent-e2e-demo.rs"
 
 # P3d-2 ETW proof demo: run elevated with `--features windows-etw` to capture real
 # Windows process events; non-elevated it reports the stub fallback and exits 0.
@@ -231,20 +226,15 @@ torda-transport-tls = { path = "../../server/transport-tls" }
 torda-remediation = { path = "../../server/remediation" }
 torda-transport = { path = "../../server/transport" }
 sysinfo = { workspace = true }
-# P3c-1 agent-e2e-demo (a [[bin]] cannot use dev-deps): hex key/pubkey files + rustls
-# ServerName for the client-side mTLS handshake. Both already used by the control_e2e test.
-hex = { workspace = true }
-rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 
 [dev-dependencies]
-# control_e2e integration test: an mTLS client + issuer over real ed25519.
+# main_modes integration test: mints a test PKI + ed25519 keys to exercise `load_config` and
+# the control-service config wiring. (The mTLS client<->issuer end-to-end test + the
+# agent-e2e-demo moved with the FSL issuer surface to `server/control-server`, so the agent
+# crate takes NO dependency — normal or dev — on `torda-control-server`.)
 torda-control-plane = { path = "../../server/control-plane" }
 torda-transport-tls = { path = "../../server/transport-tls" }
-torda-remediation = { path = "../../server/remediation" }
 hex = { workspace = true }
-# For ServerName + the client leaf DER passed to `connect`; matches the transport-tls
-# feature set (ring provider).
-rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 
 # --- Packaging -------------------------------------------------------------
 # The agent is Apache-2.0 (license.workspace). `.deb`/`.rpm`/`.msi` are built by

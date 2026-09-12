@@ -15,8 +15,9 @@
 
 use torda_control_plane::{
     AgentControlHandler, AgentControlLoop, CommandOutcome, CommandSigner, ControlFrame,
-    ControlPlaneClient, Ed25519Verifier,
+    Ed25519Verifier,
 };
+use torda_control_server::ControlPlaneClient;
 use torda_remediation::action::{
     ActionState, AssetSelector, CanarySpec, Method, RemediationAction, VerifySpec,
 };
