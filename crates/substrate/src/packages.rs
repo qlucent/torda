@@ -137,6 +137,28 @@ pub fn parse_rpm_qa(output: &str) -> Vec<Package> {
         .collect()
 }
 
+/// Parse `rpm -qa --qf '[%{NAME}\t%{FILENAMES}\n]'` output — one
+/// `name<TAB>filepath` line per file across all packages — into a map from
+/// package name to the shared-library files it provides. Non-library files and
+/// malformed lines are dropped.
+pub fn parse_rpm_files(output: &str) -> std::collections::HashMap<String, Vec<String>> {
+    let mut out: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+    for line in output.lines() {
+        let line = line.trim_end();
+        let Some((name, path)) = line.split_once('\t') else {
+            continue;
+        };
+        let (name, path) = (name.trim(), path.trim());
+        if name.is_empty() || !is_shared_library_path(path) {
+            continue;
+        }
+        out.entry(name.to_string())
+            .or_default()
+            .push(path.to_string());
+    }
+    out
+}
+
 /// Parses `reg query <UninstallKey> /s` output. Each subkey is a block beginning
 /// with an `HKEY_...` line; within it, `DisplayName` and `DisplayVersion` value
 /// lines give the package. Blocks without a `DisplayName` are skipped.
@@ -258,13 +280,32 @@ pub struct RpmProvider;
 #[cfg(target_os = "linux")]
 impl PackageProvider for RpmProvider {
     fn packages(&self) -> Vec<Package> {
-        std::process::Command::new("rpm")
+        let packages = std::process::Command::new("rpm")
             .args(["-qa", "--qf", "%{NAME}\t%{VERSION}-%{RELEASE}\n"])
             .output()
             .ok()
             .filter(|o| o.status.success())
             .map(|o| parse_rpm_qa(&String::from_utf8_lossy(&o.stdout)))
-            .unwrap_or_default()
+            .unwrap_or_default();
+
+        // One rpm call lists every file of every package as `name<TAB>path`;
+        // keep the shared libraries and attach them by package name. Best-effort:
+        // a failed query just leaves libraries empty.
+        let libs_by_pkg = std::process::Command::new("rpm")
+            .args(["-qa", "--qf", "[%{NAME}\t%{FILENAMES}\n]"])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| parse_rpm_files(&String::from_utf8_lossy(&o.stdout)))
+            .unwrap_or_default();
+
+        packages
+            .into_iter()
+            .map(|p| {
+                let libs = libs_by_pkg.get(&p.name).cloned().unwrap_or_default();
+                p.with_libraries(libs)
+            })
+            .collect()
     }
 }
 
@@ -369,6 +410,35 @@ Version: 2.39-0ubuntu8.3
         assert_eq!(pkgs.len(), 2);
         assert_eq!(pkgs[0], Package::new("openssl", "3.0.7-18.el9", "rpm"));
         assert_eq!(pkgs[1], Package::new("glibc", "2.34-60.el9", "rpm"));
+    }
+
+    #[test]
+    fn rpm_files_parser_keeps_only_shared_libraries_per_package() {
+        // `rpm -qa --qf '[%{NAME}\t%{FILENAMES}\n]'` shape: name<TAB>path per file.
+        let fixture = "\
+openssl-libs\t/usr/lib64/libssl.so.3
+openssl-libs\t/usr/lib64/libcrypto.so.3
+openssl-libs\t/usr/share/doc/openssl/README
+glibc\t/usr/lib64/libc.so.6
+glibc\t/usr/bin/ldd
+malformed-line-no-tab
+";
+        let map = parse_rpm_files(fixture);
+        assert_eq!(
+            map.get("openssl-libs").map(|v| v.as_slice()),
+            Some(
+                [
+                    "/usr/lib64/libssl.so.3".to_string(),
+                    "/usr/lib64/libcrypto.so.3".to_string()
+                ]
+                .as_slice()
+            )
+        );
+        assert_eq!(
+            map.get("glibc").map(|v| v.as_slice()),
+            Some(["/usr/lib64/libc.so.6".to_string()].as_slice())
+        );
+        assert!(map.len() == 2, "only packages with shared libs are present");
     }
 
     #[test]
