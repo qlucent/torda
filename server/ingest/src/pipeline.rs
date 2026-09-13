@@ -10,6 +10,7 @@ use torda_ocsf::OcsfEnvelope;
 
 use crate::cve_source::CveSource;
 use crate::matching::detections_from_sbom;
+use crate::reachability::RuntimeReachability;
 
 /// The end-to-end ingest result: all scored findings (including suppressed, for
 /// the record) plus the fix-grouped remediation items ops acts on.
@@ -45,7 +46,13 @@ pub fn run_ingest(
         .iter()
         .flat_map(|e| detections_from_sbom(e, feed))
         .collect();
-    let scored = Engine::new(enrichment, assets).run(detections);
+    // Runtime-confirmed reachability is derived from the SAME batch: the SBOM's
+    // per-package libraries (5020) joined against library-load observations
+    // (9003). The engine applies it upgrade-only. A batch with no 9003 (e.g. a
+    // stub-bus agent, or a direct SBOM-only call) yields no confirmations, so
+    // scoring falls back to the VEX baseline unchanged.
+    let reach = RuntimeReachability::from_envelopes(envelopes);
+    let scored = Engine::new(enrichment, assets, &reach).run(detections);
     let findings = reconcile(prior, scored, batch_time(envelopes));
     let actionable: Vec<Finding> = findings
         .iter()
@@ -239,6 +246,84 @@ mod tests {
         // Second run with that finding as prior-Closed -> the fresh one reopens.
         let second = run_ingest(&[env], &feed(), &enrichment(), &assets(), &[prior]);
         assert_eq!(second.findings[0].status, FindingState::Reopened);
+    }
+
+    #[test]
+    fn runtime_library_load_confirms_reach_upgrade_only() {
+        // openssl provides libssl.so.3; a CVE on it that VEX leaves Unknown
+        // (baseline reach 0.3). A 9003 load of that library in the same batch
+        // should upgrade reach to 1.0; absent the load, it stays 0.3.
+        let component = serde_json::json!([
+            {"name":"openssl","version":"3.0.2","source":"dpkg","libraries":["/usr/lib/libssl.so.3"]}
+        ]);
+        let feed = CveFeed(vec![CveHit {
+            name: "openssl".into(),
+            version: "3.0.2".into(),
+            vuln_id: "CVE-RCH".into(),
+            remediation_key: "fix:openssl".into(),
+        }]);
+        let mut m = HashMap::new();
+        m.insert(
+            "CVE-RCH".into(),
+            Enrichment {
+                cvss_vector: None,
+                cvss_env: Some(7.0),
+                epss: Some(0.2),
+                epss_pct: None,
+                kev: false,
+                exploit_maturity: ExploitMaturity::Functional,
+                vex: VexStatus::Unknown,
+                feed_version: None,
+            },
+        );
+        let enrichment = MapEnrichment(m);
+
+        let sbom_env = sbom(component);
+        let load_env = OcsfEnvelope::new(
+            class::RUNTIME_MODULE_LOAD,
+            "Runtime Module Load",
+            Metadata {
+                product: "torda".into(),
+                version: "0".into(),
+                tenant_id: "t".into(),
+            },
+            Device {
+                hostname: "host-1".into(),
+                os: "Test".into(),
+                os_version: "1".into(),
+            },
+            serde_json::json!({ "module": { "path": "/usr/lib/libssl.so.3" }, "pid": 1, "image": "curl" }),
+        );
+
+        // No load observation -> Unknown baseline reach 0.3, no runtime data.
+        let base = run_ingest(
+            std::slice::from_ref(&sbom_env),
+            &feed,
+            &enrichment,
+            &assets(),
+            &[],
+        );
+        let bf = base
+            .findings
+            .iter()
+            .find(|f| f.identity.vuln_id == "CVE-RCH")
+            .expect("openssl finding");
+        assert!((bf.score.explain.reach - 0.3).abs() < 1e-6);
+        assert_eq!(bf.score.explain.runtime_reachable, None);
+
+        // Load observation in the SAME batch -> reach confirmed to 1.0.
+        let confirmed = run_ingest(&[sbom_env, load_env], &feed, &enrichment, &assets(), &[]);
+        let cf = confirmed
+            .findings
+            .iter()
+            .find(|f| f.identity.vuln_id == "CVE-RCH")
+            .expect("openssl finding");
+        assert_eq!(cf.score.explain.reach, 1.0, "runtime load upgraded reach");
+        assert_eq!(cf.score.explain.runtime_reachable, Some(true));
+        assert!(
+            cf.score.r > bf.score.r,
+            "confirmed reachability raises the score"
+        );
     }
 }
 

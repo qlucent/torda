@@ -133,6 +133,17 @@ pub struct ScoreExplain {
     pub exposure: f32,
     pub crit: f32,
     pub reach: f32,
+    /// Runtime-reachability provenance for the `reach` factor:
+    /// - `Some(true)`  — a runtime observation confirmed the component's library
+    ///   was actually loaded (may have *upgraded* `reach`; see the engine).
+    /// - `Some(false)` — runtime telemetry existed for the asset but this
+    ///   component was not observed loaded (never *downgrades* `reach`).
+    /// - `None`        — no runtime-reachability data (absence is not evidence).
+    ///
+    /// Explainability only — the score reads `reach`, never this field.
+    /// `#[serde(default)]` keeps findings persisted before this existed loadable.
+    #[serde(default)]
+    pub runtime_reachable: Option<bool>,
 }
 
 /// A canonical, deduped, scored, decision-bearing finding.
@@ -229,6 +240,7 @@ mod tests {
                 exposure: 1.4,
                 crit: 1.5,
                 reach: 1.0,
+                runtime_reachable: None,
             },
         };
         let v: serde_json::Value = serde_json::from_str(&json_str(&s)).unwrap();

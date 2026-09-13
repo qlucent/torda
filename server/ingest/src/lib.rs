@@ -14,6 +14,7 @@ pub mod network;
 pub mod nvd_source;
 pub mod pipeline;
 pub mod process;
+pub mod reachability;
 pub mod scoring;
 pub mod store;
 pub mod verify;
