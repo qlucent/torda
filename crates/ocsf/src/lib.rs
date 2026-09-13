@@ -15,6 +15,7 @@ pub mod class {
     pub const FILE_INTEGRITY_FINDING: u32 = 2004;
     pub const AGENT_HEALTH: u32 = 9001; // custom extension class
     pub const CORRELATED_ACTIVITY: u32 = 9002; // custom extension: cross-sensor correlation
+    pub const RUNTIME_MODULE_LOAD: u32 = 9003; // custom extension: a shared library was loaded at runtime (reachability telemetry)
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

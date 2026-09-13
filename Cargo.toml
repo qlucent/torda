@@ -16,6 +16,7 @@ members = [
   "crates/modules/procmon",
   "crates/modules/netmon",
   "crates/modules/filemon",
+  "crates/modules/libload",
   "crates/modules/corr",
   "crates/agent",
   "server/findings-engine",

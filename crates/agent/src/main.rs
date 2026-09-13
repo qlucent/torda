@@ -319,6 +319,12 @@ async fn main() -> anyhow::Result<()> {
     // FilePolicy before assessment; on the default StubBus no events → a
     // behavior-preserving no-op until a real backend feeds the bus.
     mgr.register(Box::new(torda_mod_filemon::FileMonModule::new()));
+    // libload CONSUMES the shared event bus (FileOpen), emitting one Runtime
+    // Module Load (9003) observation per distinct shared library loaded — the
+    // runtime-reachability telemetry the backend joins against the SBOM. On the
+    // default StubBus no events → a behavior-preserving no-op until a real
+    // backend feeds the bus.
+    mgr.register(Box::new(torda_mod_libload::LibLoadModule::new()));
     // corr CONSUMES ProcessExec+NetConnect and correlates them by pid; on the
     // default StubBus no events → a behavior-preserving no-op.
     mgr.register(Box::new(torda_mod_corr::CorrModule::new()));
