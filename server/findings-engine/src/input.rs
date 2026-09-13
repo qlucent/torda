@@ -1,6 +1,7 @@
-//! Engine inputs: a raw detection and the injected enrichment / asset-context
-//! sources. The traits keep the engine pure; real feed-sync plugs in later.
-use std::collections::HashMap;
+//! Engine inputs: a raw detection and the injected enrichment / asset-context /
+//! reachability sources. The traits keep the engine pure; real feed-sync and
+//! runtime-reachability sources plug in later.
+use std::collections::{HashMap, HashSet};
 use torda_findings::{AssetContext, DetectionMethod, Enrichment, Identity};
 
 /// A single raw vulnerability detection from one source, before correlation.
@@ -26,6 +27,22 @@ pub trait AssetContextSource {
     fn context(&self, asset_id: &str) -> AssetContext;
 }
 
+/// Runtime-reachability signal: whether a finding's component was observed
+/// **loaded at runtime**. It is **upgrade-only** — the engine uses it to
+/// *confirm* (raise) a finding's `reach`, never to lower it.
+///
+/// `has_data` is load-bearing for honesty: it separates "we collected no runtime
+/// telemetry for this asset" (absence is not evidence → the engine records
+/// `runtime_reachable = None` and leaves `reach` at its VEX baseline) from "we
+/// had telemetry but did not observe this component loaded" (`Some(false)`,
+/// which still never lowers the score).
+pub trait ReachabilitySource {
+    /// Whether ANY runtime-reachability observation exists for this asset.
+    fn has_data(&self, asset_id: &str) -> bool;
+    /// Whether this finding's component was observed loaded at runtime.
+    fn confirmed(&self, id: &Identity) -> bool;
+}
+
 /// In-memory enrichment fixture, keyed by vuln id.
 #[derive(Default)]
 pub struct MapEnrichment(pub HashMap<String, Enrichment>);
@@ -48,6 +65,38 @@ impl AssetContextSource for MapAssetContext {
             .get(asset_id)
             .cloned()
             .unwrap_or_else(|| self.default.clone())
+    }
+}
+
+/// In-memory reachability fixture: which assets produced any observation, and
+/// which `(asset_id, component)` pairs were confirmed loaded.
+#[derive(Default)]
+pub struct MapReachability {
+    pub assets_with_data: HashSet<String>,
+    pub confirmed: HashSet<(String, String)>,
+}
+
+impl ReachabilitySource for MapReachability {
+    fn has_data(&self, asset_id: &str) -> bool {
+        self.assets_with_data.contains(asset_id)
+    }
+    fn confirmed(&self, id: &Identity) -> bool {
+        self.confirmed
+            .contains(&(id.asset_id.clone(), id.component.clone()))
+    }
+}
+
+/// A reachability source with no data at all: `has_data` is always false, so
+/// nothing is ever confirmed and the engine leaves every `reach` at its VEX
+/// baseline. The safe default for ingest paths with no runtime telemetry.
+pub struct NoReachability;
+
+impl ReachabilitySource for NoReachability {
+    fn has_data(&self, _asset_id: &str) -> bool {
+        false
+    }
+    fn confirmed(&self, _id: &Identity) -> bool {
+        false
     }
 }
 
@@ -98,5 +147,37 @@ mod tests {
         };
         assert_eq!(src.context("prod-1"), crown);
         assert_eq!(src.context("unknown"), dev);
+    }
+
+    fn id(asset: &str, component: &str) -> Identity {
+        Identity {
+            asset_id: asset.into(),
+            vuln_id: "CVE-2024-0001".into(),
+            component: component.into(),
+            location: "dpkg".into(),
+        }
+    }
+
+    #[test]
+    fn map_reachability_confirms_only_observed_components_on_assets_with_data() {
+        let mut src = MapReachability::default();
+        src.assets_with_data.insert("host-A".into());
+        src.confirmed.insert(("host-A".into(), "openssl".into()));
+
+        // Observed component on an asset with data -> confirmed.
+        assert!(src.has_data("host-A"));
+        assert!(src.confirmed(&id("host-A", "openssl")));
+        // Same asset, a different (unobserved) component -> not confirmed, but data exists.
+        assert!(!src.confirmed(&id("host-A", "zlib")));
+        // An asset with no telemetry at all -> no data, nothing confirmed.
+        assert!(!src.has_data("host-B"));
+        assert!(!src.confirmed(&id("host-B", "openssl")));
+    }
+
+    #[test]
+    fn no_reachability_never_has_data_or_confirms() {
+        let src = NoReachability;
+        assert!(!src.has_data("host-A"));
+        assert!(!src.confirmed(&id("host-A", "openssl")));
     }
 }

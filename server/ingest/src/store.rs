@@ -293,6 +293,7 @@ mod tests {
                     exposure: 0.8,
                     crit: 0.9,
                     reach: 1.0,
+                    runtime_reachable: None,
                 },
             },
             decision: Decision::Attend,

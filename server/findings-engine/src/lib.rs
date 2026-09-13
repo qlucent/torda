@@ -12,21 +12,30 @@ pub mod score;
 
 use crate::correlate::correlate;
 use crate::decide::decide;
-use crate::input::{AssetContextSource, EnrichmentSource, RawDetection};
-use crate::score::recompute_score;
-use torda_findings::{Enrichment, Finding, Identity};
+use crate::input::{AssetContextSource, EnrichmentSource, RawDetection, ReachabilitySource};
+use crate::score::{reach_gate, recompute_score_with_reach};
+use torda_findings::{Enrichment, Finding, Identity, VexStatus};
 
-/// The findings engine: correlate → enrich → recompute score → decide. Produces
-/// canonical, deduped, scored, decision-bearing findings. Group-by-fix and
-/// lifecycle/regression are slice 1.4b.
+/// The findings engine: correlate → enrich → recompute score (with runtime
+/// reachability) → decide. Produces canonical, deduped, scored, decision-bearing
+/// findings. Group-by-fix and lifecycle/regression are slice 1.4b.
 pub struct Engine<'a> {
     enrichment: &'a dyn EnrichmentSource,
     assets: &'a dyn AssetContextSource,
+    reach: &'a dyn ReachabilitySource,
 }
 
 impl<'a> Engine<'a> {
-    pub fn new(enrichment: &'a dyn EnrichmentSource, assets: &'a dyn AssetContextSource) -> Self {
-        Self { enrichment, assets }
+    pub fn new(
+        enrichment: &'a dyn EnrichmentSource,
+        assets: &'a dyn AssetContextSource,
+        reach: &'a dyn ReachabilitySource,
+    ) -> Self {
+        Self {
+            enrichment,
+            assets,
+            reach,
+        }
     }
 
     /// Runs the pipeline over a batch of detections.
@@ -39,9 +48,29 @@ impl<'a> Engine<'a> {
                     .enrichment
                     .lookup(&c.identity.vuln_id)
                     .unwrap_or_else(unknown_enrichment);
-                let score = recompute_score(&enr, &ctx);
+
+                // Runtime-confirmed reachability — UPGRADE ONLY. If runtime
+                // telemetry exists for this asset, record whether the component's
+                // library was observed loaded; when it WAS and VEX left reach
+                // uncertain (`Unknown` → 0.3), confirm `reach` to 1.0. Absence of
+                // telemetry is not evidence (`None`, baseline kept); we never
+                // lower `reach` and never un-suppress a `NotAffected` finding.
+                let runtime_reachable = if self.reach.has_data(&c.identity.asset_id) {
+                    Some(self.reach.confirmed(&c.identity))
+                } else {
+                    None
+                };
+                let effective_reach =
+                    if runtime_reachable == Some(true) && enr.vex == VexStatus::Unknown {
+                        1.0
+                    } else {
+                        reach_gate(enr.vex)
+                    };
+                let mut score = recompute_score_with_reach(&enr, &ctx, effective_reach);
+                score.explain.runtime_reachable = runtime_reachable;
+
                 let (decision, sla_hours) = decide(score.r, enr.kev, true, score.explain.reach);
-                let status = if enr.vex == torda_findings::VexStatus::NotAffected {
+                let status = if enr.vex == VexStatus::NotAffected {
                     torda_findings::FindingState::Suppressed
                 } else {
                     torda_findings::FindingState::Open
@@ -95,7 +124,8 @@ fn unknown_enrichment() -> Enrichment {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::input::{MapAssetContext, MapEnrichment};
+    use crate::input::{MapAssetContext, MapEnrichment, MapReachability, NoReachability};
+    use crate::score::recompute_score;
     use std::collections::HashMap;
     use torda_findings::{
         AssetContext, Criticality, Decision, DetectionMethod, ExploitMaturity, VexStatus,
@@ -161,7 +191,7 @@ mod tests {
             by_asset: HashMap::new(),
             default: ctx(false, Criticality::Normal, false),
         };
-        let engine = Engine::new(&enrichment, &assets);
+        let engine = Engine::new(&enrichment, &assets, &NoReachability);
 
         let dets = vec![
             det(
@@ -220,7 +250,7 @@ mod tests {
             by_asset: HashMap::new(),
             default: ctx(true, Criticality::Normal, false),
         };
-        let engine = Engine::new(&enrichment, &assets);
+        let engine = Engine::new(&enrichment, &assets, &NoReachability);
         let findings = engine.run(vec![det(
             "host-A",
             "CVE-Y",
@@ -248,7 +278,7 @@ mod tests {
             by_asset: HashMap::new(),
             default: ctx(true, Criticality::Normal, false),
         };
-        let engine = Engine::new(&enrichment, &assets);
+        let engine = Engine::new(&enrichment, &assets, &NoReachability);
         let findings = engine.run(vec![det(
             "host-A",
             "CVE-W",
@@ -288,7 +318,7 @@ mod tests {
             by_asset,
             default: ctx(false, Criticality::Normal, false),
         };
-        let engine = Engine::new(&enrichment, &assets);
+        let engine = Engine::new(&enrichment, &assets, &NoReachability);
 
         let findings = engine.run(vec![
             det(
@@ -355,7 +385,7 @@ mod tests {
             by_asset: HashMap::new(),
             default: ctx(true, Criticality::CrownJewel, false),
         };
-        let engine = Engine::new(&enrichment, &assets);
+        let engine = Engine::new(&enrichment, &assets, &NoReachability);
         let findings = engine.run(vec![det(
             "host-A",
             "CVE-Z",
@@ -392,7 +422,7 @@ mod tests {
             by_asset: HashMap::new(),
             default: ctx(false, Criticality::Normal, false),
         };
-        let engine = Engine::new(&enrichment, &assets);
+        let engine = Engine::new(&enrichment, &assets, &NoReachability);
         let findings = engine.run(vec![det(
             "host-A",
             "CVE-Q",
@@ -402,5 +432,130 @@ mod tests {
             0.95,
         )]);
         assert_eq!(findings[0].status, FindingState::Open);
+    }
+
+    #[test]
+    fn runtime_reachability_upgrades_unknown_reach_only_when_confirmed() {
+        // Unknown VEX => baseline reach 0.3. Runtime confirmation of the
+        // component's library load upgrades reach to 1.0; telemetry-but-not-
+        // observed keeps 0.3; no telemetry keeps 0.3 with runtime_reachable None.
+        let mut e = HashMap::new();
+        e.insert(
+            "CVE-U".to_string(),
+            enr(
+                7.0,
+                0.2,
+                ExploitMaturity::Functional,
+                false,
+                VexStatus::Unknown,
+            ),
+        );
+        let enrichment = MapEnrichment(e);
+        let assets = MapAssetContext {
+            by_asset: HashMap::new(),
+            default: ctx(true, Criticality::High, false),
+        };
+        let run = |src: &dyn crate::input::ReachabilitySource| {
+            Engine::new(&enrichment, &assets, src).run(vec![det(
+                "host-A",
+                "CVE-U",
+                "torda",
+                DetectionMethod::Authenticated,
+                None,
+                0.95,
+            )])
+        };
+
+        let mut confirmed = MapReachability::default();
+        confirmed.assets_with_data.insert("host-A".into());
+        confirmed
+            .confirmed
+            .insert(("host-A".into(), "openssl".into()));
+        let f_conf = run(&confirmed);
+        assert_eq!(
+            f_conf[0].score.explain.reach, 1.0,
+            "confirmed load upgrades Unknown reach 0.3 -> 1.0"
+        );
+        assert_eq!(f_conf[0].score.explain.runtime_reachable, Some(true));
+
+        let mut not_observed = MapReachability::default();
+        not_observed.assets_with_data.insert("host-A".into());
+        let f_base = run(&not_observed);
+        assert!(
+            (f_base[0].score.explain.reach - 0.3).abs() < 1e-6,
+            "telemetry present but component unobserved -> baseline 0.3"
+        );
+        assert_eq!(f_base[0].score.explain.runtime_reachable, Some(false));
+        assert!(
+            f_conf[0].score.r > f_base[0].score.r,
+            "confirmed reachability scores strictly higher"
+        );
+
+        let f_none = run(&NoReachability);
+        assert_eq!(f_none[0].score.explain.runtime_reachable, None);
+        assert!((f_none[0].score.explain.reach - 0.3).abs() < 1e-6);
+    }
+
+    #[test]
+    fn runtime_reachability_never_downgrades_or_unsuppresses() {
+        use torda_findings::FindingState;
+        let assets = MapAssetContext {
+            by_asset: HashMap::new(),
+            default: ctx(true, Criticality::CrownJewel, false),
+        };
+        let mut reach = MapReachability::default();
+        reach.assets_with_data.insert("host-A".into());
+        reach.confirmed.insert(("host-A".into(), "openssl".into()));
+
+        // Affected (reach already 1.0): confirmation records true, reach stays 1.0.
+        let mut ea = HashMap::new();
+        ea.insert(
+            "CVE-A".to_string(),
+            enr(
+                7.0,
+                0.2,
+                ExploitMaturity::Functional,
+                false,
+                VexStatus::Affected,
+            ),
+        );
+        let f_aff = Engine::new(&MapEnrichment(ea), &assets, &reach).run(vec![det(
+            "host-A",
+            "CVE-A",
+            "torda",
+            DetectionMethod::Authenticated,
+            None,
+            0.95,
+        )]);
+        assert_eq!(f_aff[0].score.explain.reach, 1.0);
+        assert_eq!(f_aff[0].score.explain.runtime_reachable, Some(true));
+        assert_eq!(f_aff[0].status, FindingState::Open);
+
+        // NotAffected: confirmation must NOT un-suppress or raise the score.
+        let mut en = HashMap::new();
+        en.insert(
+            "CVE-N".to_string(),
+            enr(
+                9.8,
+                0.9,
+                ExploitMaturity::InTheWild,
+                false,
+                VexStatus::NotAffected,
+            ),
+        );
+        let f_na = Engine::new(&MapEnrichment(en), &assets, &reach).run(vec![det(
+            "host-A",
+            "CVE-N",
+            "torda",
+            DetectionMethod::Authenticated,
+            None,
+            0.95,
+        )]);
+        assert_eq!(
+            f_na[0].status,
+            FindingState::Suppressed,
+            "confirmation never un-suppresses NotAffected"
+        );
+        assert_eq!(f_na[0].score.r, 0, "reach stays 0 for NotAffected");
     }
 }

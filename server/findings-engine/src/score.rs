@@ -54,6 +54,17 @@ pub fn exposure_factor(ctx: &AssetContext) -> f32 {
 ///   reach      = reach_gate(vex)                            (0 | 0.3 | 1)
 ///   R = round(100 * clamp01( sev * (0.4 + 0.6*likelihood) * exposure * crit * reach ))
 pub fn recompute_score(enr: &Enrichment, ctx: &AssetContext) -> Score {
+    recompute_score_with_reach(enr, ctx, reach_gate(enr.vex))
+}
+
+/// Like [`recompute_score`] but with the `reach` factor supplied by the caller
+/// instead of derived from `enr.vex`. This is the seam runtime-confirmed
+/// reachability uses to **upgrade** `reach` (e.g. VEX `Unknown` 0.3 → 1.0 once a
+/// runtime observation confirms the component's library was loaded). All other
+/// factors are identical to [`recompute_score`]. `explain.runtime_reachable` is
+/// left `None` here — the engine sets it, since only the engine knows whether a
+/// runtime observation was consulted.
+pub fn recompute_score_with_reach(enr: &Enrichment, ctx: &AssetContext, reach: f32) -> Score {
     let sev = (enr.cvss_env.unwrap_or(0.0) / 10.0).clamp(0.0, 1.0);
     let likelihood = enr
         .epss
@@ -62,7 +73,6 @@ pub fn recompute_score(enr: &Enrichment, ctx: &AssetContext) -> Score {
         .clamp(0.0, 1.0);
     let exposure = exposure_factor(ctx);
     let crit = criticality_weight(ctx.criticality);
-    let reach = reach_gate(enr.vex);
 
     let raw = (sev * (0.4 + 0.6 * likelihood) * exposure * crit * reach).clamp(0.0, 1.0);
     Score {
@@ -73,6 +83,7 @@ pub fn recompute_score(enr: &Enrichment, ctx: &AssetContext) -> Score {
             exposure,
             crit,
             reach,
+            runtime_reachable: None,
         },
     }
 }
@@ -97,6 +108,7 @@ pub fn recompute_compliance_score(weight: f32, ctx: &AssetContext) -> Score {
             exposure,
             crit,
             reach: 1.0,
+            runtime_reachable: None,
         },
     }
 }
