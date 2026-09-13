@@ -50,13 +50,23 @@ TOML — edit it to taste, and CLI flags still override it):
 
 ```bash
 sudo cp deploy/torda.service /etc/systemd/system/
-sudo mkdir -p /etc/torda /var/log/torda
+sudo mkdir -p /etc/torda   # /var/log/torda is auto-created by the unit (LogsDirectory)
 sudo cp deploy/torda.toml /etc/torda/config.toml   # then edit it
 sudo systemctl daemon-reload
 sudo systemctl enable --now torda
-journalctl -u torda -f   # stderr: startup/health lines
-tail -f /var/log/torda/events.ndjson   # stdout-equivalent: OCSF NDJSON
+journalctl -u torda -f   # agent diagnostics (StandardError=journal)
+tail -f /var/log/torda/events.ndjson   # the OCSF NDJSON file sink
 ```
+
+The unit ships **hardened**: bounded footprint (`MemoryMax`/`CPUQuota`/`TasksMax`),
+a crash-loop guard (`StartLimitBurst`), a `CapabilityBoundingSet` limited to what
+collection needs (`CAP_BPF`/`CAP_PERFMON`/`CAP_SYS_ADMIN`/…), safe sandboxing
+(`ProtectHome`, `PrivateTmp`, `RestrictRealtime`, `LockPersonality`), journald
+diagnostics, and `LogsDirectory=torda` (auto-creates `/var/log/torda`). It
+deliberately omits directives that break an eBPF agent (e.g.
+`MemoryDenyWriteExecute`, `ProtectSystem=strict`, `SystemCallFilter`) — see the
+comments in `deploy/torda.service`. If your kernel needs different caps for eBPF,
+adjust `CapabilityBoundingSet` there.
 
 For a bounded test run instead of the real service, run directly (flags here
 override the config the same way they would against the installed service):

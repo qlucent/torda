@@ -18,6 +18,10 @@ Description=torda — unified security agent (daemon mode, OCSF file sink)
 Documentation=https://github.com/ (see docs/DEPLOY.md in this repo)
 After=network-online.target
 Wants=network-online.target
+# Crash-loop guard: stop retrying after 5 failed starts in 60s
+# (`systemctl reset-failed torda` clears it).
+StartLimitIntervalSec=60
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -37,10 +41,39 @@ ExecStart=/usr/local/bin/torda --config /etc/torda/config.toml
 Restart=on-failure
 RestartSec=5s
 
-# Optional hardening (loosen if it conflicts with your eBPF/CAP_BPF setup):
+# --- Footprint bounds: keep it "one light agent". Tune for your fleet. ---
+MemoryHigh=192M
+MemoryMax=256M
+CPUQuota=40%
+TasksMax=128
+
+# --- Least privilege: run as root (collection needs it) but BOUND the capability
+# set to what collection actually uses. eBPF load needs CAP_BPF + CAP_PERFMON
+# (kernel >= 5.8) or CAP_SYS_ADMIN (older); reading /proc + package DBs needs
+# CAP_DAC_READ_SEARCH / CAP_SYS_PTRACE. Add caps here if your kernel needs them. ---
+CapabilityBoundingSet=CAP_BPF CAP_PERFMON CAP_SYS_ADMIN CAP_SYS_PTRACE CAP_DAC_READ_SEARCH CAP_SYSLOG
+
+# --- Sandboxing that does NOT interfere with eBPF/ETW collection ---
 NoNewPrivileges=false
 ProtectSystem=full
-ReadWritePaths=/var/log/torda
+ProtectHome=true
+PrivateTmp=true
+RestrictRealtime=true
+LockPersonality=true
+# systemd creates /var/log/torda (0755) and makes it writable — no pre-create,
+# no ReadWritePaths-on-missing-dir startup failure. Point the OCSF file sink here.
+LogsDirectory=torda
+
+# --- Agent diagnostics to the journal (OCSF findings still go to the file sink) ---
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=torda
+
+# DELIBERATELY NOT SET — each silently degrades an eBPF security agent:
+#   MemoryDenyWriteExecute=true (blocks the eBPF JIT), ProtectSystem=strict,
+#   ProtectKernelTunables=true, SystemCallFilter=…, PrivateDevices=true,
+#   RestrictAddressFamilies=… . Tighten per-kernel ONLY after confirming eBPF/ETW
+#   capture still works.
 
 [Install]
 WantedBy=multi-user.target
