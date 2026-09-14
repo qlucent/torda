@@ -2,7 +2,7 @@ name: CI
 
 # Three legs:
 #   1. `stub`        — the default (stub-substrate) build: fmt + clippy + build +
-#                      test on Linux and Windows. Needs no privilege or toolchain.
+#                      test on Linux, Windows, and macOS. Needs no privilege or toolchain.
 #   2. `linux-ebpf`  — the real eBPF backend: clippy + test with `--features
 #                      linux-ebpf`. The substrate build.rs shells to `cargo
 #                      +nightly` and links with bpf-linker, so this leg installs
@@ -34,7 +34,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
