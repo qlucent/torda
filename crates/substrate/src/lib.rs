@@ -204,13 +204,16 @@ fn select_event_bus() -> (Arc<dyn EventBus>, &'static str) {
 }
 
 fn read_hostname() -> String {
-    // Unix: /etc/hostname or $HOSTNAME. Windows: %COMPUTERNAME%.
+    // Linux: /etc/hostname or $HOSTNAME. Windows: %COMPUTERNAME%. macOS (and any
+    // host where those are unset — e.g. a CI runner): the `hostname` command,
+    // which exists on Linux/macOS/Windows. Called once at construction.
     fs::read_to_string("/etc/hostname")
         .map(|s| s.trim().to_string())
         .ok()
         .filter(|s| !s.is_empty())
         .or_else(|| env_nonempty("HOSTNAME"))
         .or_else(|| env_nonempty("COMPUTERNAME"))
+        .or_else(hostname_cmd)
         .unwrap_or_else(|| "unknown-host".to_string())
 }
 
@@ -218,9 +221,38 @@ fn env_nonempty(key: &str) -> Option<String> {
     std::env::var(key).ok().filter(|s| !s.is_empty())
 }
 
+/// The `hostname` command's output (Linux/macOS/Windows all ship one), trimmed.
+fn hostname_cmd() -> Option<String> {
+    std::process::Command::new("hostname")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
 /// Reads OS name + version. The substrate is the only component allowed to
 /// query the OS directly; P1 swaps these stubs for real table providers.
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "macos")]
+fn read_os_release() -> (String, String) {
+    // `sw_vers -productName` / `-productVersion` (e.g. "macOS" / "14.5"). Called
+    // once at construction, never in a hot path.
+    let field = |arg: &str| -> Option<String> {
+        std::process::Command::new("sw_vers")
+            .arg(arg)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .filter(|s| !s.is_empty())
+    };
+    (
+        field("-productName").unwrap_or_else(|| "macOS".to_string()),
+        field("-productVersion").unwrap_or_else(|| "0".to_string()),
+    )
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 fn read_os_release() -> (String, String) {
     let content = fs::read_to_string("/etc/os-release").unwrap_or_default();
     let mut name = "unknown".to_string();

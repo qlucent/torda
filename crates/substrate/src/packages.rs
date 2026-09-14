@@ -38,16 +38,19 @@ impl Package {
 }
 
 /// True if `path`'s final component names a shared library — Linux `*.so` /
-/// `*.so.<ver>` or Windows `*.dll` (case-insensitive). Used both to pick
-/// library files out of a dpkg `.list` and (in `torda-mod-libload`) to filter
-/// `FileOpen` events down to library loads.
+/// `*.so.<ver>`, Windows `*.dll`, or macOS `*.dylib` (case-insensitive). Used to
+/// pick library files out of a package's file list and (in `torda-mod-libload`)
+/// to filter `FileOpen` events down to library loads.
 pub fn is_shared_library_path(path: &str) -> bool {
     let base = path
         .rsplit(['/', '\\'])
         .next()
         .unwrap_or(path)
         .to_ascii_lowercase();
-    base.ends_with(".so") || base.contains(".so.") || base.ends_with(".dll")
+    base.ends_with(".so")
+        || base.contains(".so.")
+        || base.ends_with(".dll")
+        || base.ends_with(".dylib")
 }
 
 /// The shared-library file paths listed in a dpkg `.list` file body (one path
@@ -157,6 +160,24 @@ pub fn parse_rpm_files(output: &str) -> std::collections::HashMap<String, Vec<St
             .push(path.to_string());
     }
     out
+}
+
+/// Parse `brew list --versions` output (macOS/Homebrew): each line is
+/// `name version [more-versions...]`. Takes the name and its first version. Lines
+/// without a version are skipped.
+pub fn parse_brew_list(output: &str) -> Vec<Package> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let mut cols = line.split_whitespace();
+            let name = cols.next()?;
+            let version = cols.next()?; // first version column
+            if name.is_empty() {
+                return None;
+            }
+            Some(Package::new(name, version, "homebrew"))
+        })
+        .collect()
 }
 
 /// Parses `reg query <UninstallKey> /s` output. Each subkey is a block beginning
@@ -341,6 +362,25 @@ fn reg_query_s(key: &str) -> Option<String> {
     }
 }
 
+/// macOS package inventory from Homebrew (`brew list --versions`). Best-effort:
+/// no brew (or a failed call) yields an empty list. `libraries` are left empty
+/// for now — mapping brew formulae to their `.dylib` files is a follow-up, so
+/// runtime-confirmed reachability on macOS stays at the VEX baseline until then.
+#[cfg(target_os = "macos")]
+pub struct HomebrewProvider;
+#[cfg(target_os = "macos")]
+impl PackageProvider for HomebrewProvider {
+    fn packages(&self) -> Vec<Package> {
+        std::process::Command::new("brew")
+            .args(["list", "--versions"])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| parse_brew_list(&String::from_utf8_lossy(&o.stdout)))
+            .unwrap_or_default()
+    }
+}
+
 /// Selects the right provider for the host OS.
 #[cfg(target_os = "linux")]
 pub fn default_package_provider() -> Box<dyn PackageProvider> {
@@ -356,7 +396,12 @@ pub fn default_package_provider() -> Box<dyn PackageProvider> {
     Box::new(RegistryProvider)
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "windows")))]
+#[cfg(target_os = "macos")]
+pub fn default_package_provider() -> Box<dyn PackageProvider> {
+    Box::new(HomebrewProvider)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
 pub fn default_package_provider() -> Box<dyn PackageProvider> {
     Box::new(EmptyProvider)
 }
@@ -410,6 +455,25 @@ Version: 2.39-0ubuntu8.3
         assert_eq!(pkgs.len(), 2);
         assert_eq!(pkgs[0], Package::new("openssl", "3.0.7-18.el9", "rpm"));
         assert_eq!(pkgs[1], Package::new("glibc", "2.34-60.el9", "rpm"));
+    }
+
+    #[test]
+    fn brew_list_parser_takes_name_and_first_version() {
+        let fixture = "\
+openssl@3 3.2.1
+git 2.43.0 2.42.0
+python@3.11 3.11.6
+malformed-no-version
+";
+        let pkgs = parse_brew_list(fixture);
+        assert_eq!(pkgs.len(), 3, "the version-less line is skipped");
+        assert_eq!(pkgs[0], Package::new("openssl@3", "3.2.1", "homebrew"));
+        assert_eq!(
+            pkgs[1],
+            Package::new("git", "2.43.0", "homebrew"),
+            "first version column wins"
+        );
+        assert_eq!(pkgs[2], Package::new("python@3.11", "3.11.6", "homebrew"));
     }
 
     #[test]
@@ -529,6 +593,10 @@ Version: 3.0
         assert!(is_shared_library_path("/usr/lib/libssl.so"));
         assert!(is_shared_library_path("libcrypto.so.3.0.0"));
         assert!(is_shared_library_path(r"C:\Windows\System32\ssleay32.DLL"));
+        assert!(is_shared_library_path(
+            "/usr/local/opt/openssl@3/lib/libssl.3.dylib"
+        ));
+        assert!(is_shared_library_path("libcrypto.dylib"));
         assert!(!is_shared_library_path("/usr/bin/openssl"));
         assert!(!is_shared_library_path(
             "/usr/share/doc/openssl/changelog.gz"
@@ -577,7 +645,7 @@ Version: 3.0
         for p in &pkgs {
             assert!(!p.name.is_empty(), "package with empty name: {p:?}");
             assert!(
-                matches!(p.source.as_str(), "dpkg" | "rpm" | "registry"),
+                matches!(p.source.as_str(), "dpkg" | "rpm" | "registry" | "homebrew"),
                 "unexpected source: {p:?}"
             );
         }
