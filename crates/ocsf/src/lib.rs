@@ -16,6 +16,7 @@ pub mod class {
     pub const AGENT_HEALTH: u32 = 9001; // custom extension class
     pub const CORRELATED_ACTIVITY: u32 = 9002; // custom extension: cross-sensor correlation
     pub const RUNTIME_MODULE_LOAD: u32 = 9003; // custom extension: a shared library was loaded at runtime (reachability telemetry)
+    pub const AI_INVENTORY_INFO: u32 = 9004; // custom extension: AI runtimes/servers discovered on the host (local-LLM inventory)
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

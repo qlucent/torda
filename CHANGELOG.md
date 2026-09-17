@@ -6,7 +6,14 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+
+- **AI-server discovery** (`aidiscovery` module). Reads a new `listeners`
+  snapshot table (TCP listening sockets, via `ss`/`netstat`/`lsof` behind a
+  `ListenerProvider`) and reports locally-running AI runtimes — Ollama, LM Studio,
+  llama.cpp, vLLM, and more — as **AI Inventory Info** (`9004`), including whether
+  each is **exposed** beyond loopback. Discovery only: the agent inventories your
+  local AI footprint; scoring/posture is the backend's job.
 
 ## [0.1.0] — 2026-07-20
 
