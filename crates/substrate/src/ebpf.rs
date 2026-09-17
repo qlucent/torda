@@ -26,13 +26,15 @@ use aya::Ebpf;
 use tokio::sync::broadcast;
 use torda_core::{EventBus, EventKind, SubstrateEvent};
 use torda_substrate_ebpf_common::{
-    FileEvent, NetEvent, ProcEvent, KIND_CONNECT, KIND_EXEC, KIND_EXIT, KIND_OPEN, PATH_CAP,
+    FileEvent, FileWriteEvent, NetEvent, ProcEvent, KIND_CONNECT, KIND_EXEC, KIND_EXIT, KIND_OPEN,
+    KIND_WRITE, PATH_CAP,
 };
 
 use crate::etw::{file_event, net_event, process_event};
 
 /// The compiled BPF object (staged by `build.rs`) containing ALL the tracepoint
-/// programs (the two process ones, the connect one, and the openat file one).
+/// programs (the two process ones, the connect one, the openat file one, and the
+/// byte-level write one).
 /// [`EbpfBus::try_start`] feeds these bytes to [`aya::Ebpf::load`], which loads
 /// every program in the object.
 pub(crate) static PROC_EXEC_OBJ: &[u8] =
@@ -61,12 +63,19 @@ const OPENAT_TP_CATEGORY: &str = "syscalls";
 /// The openat tracepoint name (`syscalls/sys_enter_openat`); doubles as the
 /// openat handler's program name.
 const OPENAT_TP_NAME: &str = "sys_enter_openat";
+/// Category of the byte-level file-write tracepoint (`syscalls/sys_enter_write`).
+const WRITE_TP_CATEGORY: &str = "syscalls";
+/// The write tracepoint name (`syscalls/sys_enter_write`); doubles as the write
+/// handler's program name.
+const WRITE_TP_NAME: &str = "sys_enter_write";
 /// The `#[map]` static name — the ring buffer shared by both process programs.
 const MAP_NAME: &str = "EVENTS";
 /// The `#[map]` static name for the SEPARATE network-connect ring buffer.
 const NET_MAP_NAME: &str = "NET_EVENTS";
 /// The `#[map]` static name for the SEPARATE file-open ring buffer.
 const FILE_MAP_NAME: &str = "FILE_EVENTS";
+/// The `#[map]` static name for the SEPARATE byte-level file-write ring buffer.
+const WRITE_MAP_NAME: &str = "WRITE_EVENTS";
 
 /// Idle wait between ring-buffer drains. Bounds both CPU (no hard busy-spin when
 /// idle) and the [`Drop`] join latency (a stop flag is checked once per cycle).
@@ -90,6 +99,10 @@ pub struct EbpfBus {
     /// `Drop`. A SEPARATE thread from `poller`/`net_poller` since each ring is
     /// drained independently.
     file_poller: Option<JoinHandle<()>>,
+    /// The byte-level write ring-buffer (`WRITE_EVENTS`) drain thread; joined
+    /// (bounded) in `Drop`. A SEPARATE thread since each ring is drained
+    /// independently.
+    write_poller: Option<JoinHandle<()>>,
     /// The loaded+attached BPF object. Kept alive ONLY for its lifetime — while
     /// it lives the tracepoint stays attached; dropping it detaches the program.
     /// Never touched after construction, hence the leading underscore.
@@ -134,6 +147,9 @@ impl EbpfBus {
             // the same unit — a failure here fails the whole start (fail-soft →
             // `StubBus`), like the process and connect tracepoints.
             attach_tracepoint(&mut ebpf, OPENAT_TP_CATEGORY, OPENAT_TP_NAME)?;
+            // The byte-level write sensor: `syscalls` category again. Same unit —
+            // a failure fails the whole start (fail-soft → `StubBus`).
+            attach_tracepoint(&mut ebpf, WRITE_TP_CATEGORY, WRITE_TP_NAME)?;
         }
 
         // Take the process ring-buffer map OUT of the object so we own it
@@ -159,6 +175,13 @@ impl EbpfBus {
         })?;
         let mut file_ring: RingBuf<MapData> = RingBuf::try_from(file_map)
             .map_err(|e| anyhow::anyhow!("map `{FILE_MAP_NAME}` is not a ring buffer: {e}"))?;
+
+        // Likewise take the SEPARATE byte-level write ring-buffer map.
+        let write_map = ebpf.take_map(WRITE_MAP_NAME).ok_or_else(|| {
+            anyhow::anyhow!("ring-buffer map `{WRITE_MAP_NAME}` not found in object")
+        })?;
+        let mut write_ring: RingBuf<MapData> = RingBuf::try_from(write_map)
+            .map_err(|e| anyhow::anyhow!("map `{WRITE_MAP_NAME}` is not a ring buffer: {e}"))?;
 
         let (tx, _rx) = broadcast::channel(1024);
         let stop = Arc::new(AtomicBool::new(false));
@@ -209,12 +232,32 @@ impl EbpfBus {
             })
             .map_err(|e| anyhow::anyhow!("failed to spawn eBPF file ring-buffer thread: {e}"))?;
 
+        // Write drain thread: a FOURTH thread draining `WRITE_EVENTS` with
+        // `map_write_record` (FileWriteEvent → FileWrite). `enrich_write` resolves
+        // the path from /proc/<pid>/fd/<fd>. Shares the stop flag + channel; joined
+        // in `Drop` with the rest.
+        let write_tx = tx.clone();
+        let write_stop = stop.clone();
+        let write_poller = std::thread::Builder::new()
+            .name("ebpf-write-ringbuf".to_string())
+            .spawn(move || {
+                drain_loop(
+                    &mut write_ring,
+                    &write_tx,
+                    &write_stop,
+                    map_write_record,
+                    enrich_write,
+                )
+            })
+            .map_err(|e| anyhow::anyhow!("failed to spawn eBPF write ring-buffer thread: {e}"))?;
+
         Ok(Arc::new(Self {
             tx,
             stop,
             poller: Some(poller),
             net_poller: Some(net_poller),
             file_poller: Some(file_poller),
+            write_poller: Some(write_poller),
             _ebpf: ebpf,
         }))
     }
@@ -526,6 +569,78 @@ fn map_file_record(bytes: &[u8]) -> Option<SubstrateEvent> {
     ))
 }
 
+/// Map one raw `WRITE_EVENTS` record to a [`SubstrateEvent`] (`FileWrite`) — the
+/// byte-level write signal. Returns `None` (skip, never panic) for a
+/// truncated/malformed record OR an unrecognized `kind`.
+///
+/// The event carries `{ pid, image, op: "write", bytes, fd }` but NO usable path
+/// yet: `write(2)` names only the fd. The `path` is left EMPTY here and resolved
+/// by [`enrich_write`] on the drain thread from `/proc/<pid>/fd/<fd>`. `bytes` is
+/// the requested `write` length (`Some(n)`, always present for a write record).
+fn map_write_record(bytes: &[u8]) -> Option<SubstrateEvent> {
+    if bytes.len() < core::mem::size_of::<FileWriteEvent>() {
+        return None;
+    }
+    let kind_off = core::mem::offset_of!(FileWriteEvent, kind);
+    let pid_off = core::mem::offset_of!(FileWriteEvent, pid);
+    let bytes_off = core::mem::offset_of!(FileWriteEvent, bytes);
+    let fd_off = core::mem::offset_of!(FileWriteEvent, fd);
+    let comm_off = core::mem::offset_of!(FileWriteEvent, comm);
+
+    let kind_raw = u32::from_ne_bytes(bytes.get(kind_off..kind_off + 4)?.try_into().ok()?);
+    // Only the write kind is understood in v0; anything else → skip.
+    if kind_raw != KIND_WRITE {
+        return None;
+    }
+
+    let pid = u32::from_ne_bytes(bytes.get(pid_off..pid_off + 4)?.try_into().ok()?);
+    let nbytes = u64::from_ne_bytes(bytes.get(bytes_off..bytes_off + 8)?.try_into().ok()?);
+    let fd = u32::from_ne_bytes(bytes.get(fd_off..fd_off + 4)?.try_into().ok()?);
+    let comm = bytes.get(comm_off..comm_off + 16)?;
+
+    let image = comm_to_image(comm);
+    // Path is unknown from the fd alone → empty placeholder; `enrich_write` fills
+    // it from procfs. `bytes` = the requested write length (byte-level signal).
+    let mut ev = file_event(now_ms(), pid, &image, "", true, Some(nbytes));
+    // Stash the raw fd so `enrich_write` can resolve /proc/<pid>/fd/<fd>.
+    if let Some(obj) = ev.fields.as_object_mut() {
+        obj.insert("fd".to_string(), serde_json::Value::from(fd));
+    }
+    Some(ev)
+}
+
+/// Resolve a byte-level `FileWrite` event's `fd` to a filesystem path via
+/// `/proc/<pid>/fd/<fd>` (a symlink to the open file), replacing the empty
+/// placeholder `path`. Best-effort with the SAME liveness caveat as the exec
+/// enrichers: an fd closed before this read yields no path (the event keeps its
+/// empty path and downstream path filters drop it). Only ABSOLUTE filesystem
+/// paths are accepted — an fd to a socket/pipe/anon-inode readlinks to
+/// `socket:[...]` / `pipe:[...]` / `anon_inode:[...]` (not absolute), which is not
+/// a file write and is left unresolved. Never touches non-write events. Runs on
+/// the drain thread (substrate-side OS access, not a module).
+fn enrich_write(ev: &mut SubstrateEvent) {
+    if ev.kind != EventKind::FileWrite {
+        return;
+    }
+    let Some(pid) = ev.fields.get("pid").and_then(serde_json::Value::as_u64) else {
+        return;
+    };
+    let Some(fd) = ev.fields.get("fd").and_then(serde_json::Value::as_u64) else {
+        return;
+    };
+    if let Ok(target) = std::fs::read_link(format!("/proc/{pid}/fd/{fd}")) {
+        // A real file has an absolute target; socket:/pipe:/anon_inode: do not.
+        if target.is_absolute() {
+            if let Some(obj) = ev.fields.as_object_mut() {
+                obj.insert(
+                    "path".to_string(),
+                    serde_json::Value::String(target.to_string_lossy().into_owned()),
+                );
+            }
+        }
+    }
+}
+
 /// Decode the NUL-padded 16-byte task comm into a `String` (lossy UTF-8, trimmed
 /// at the first NUL). This is the short process name, not a path.
 fn comm_to_image(comm: &[u8]) -> String {
@@ -556,6 +671,9 @@ impl Drop for EbpfBus {
         }
         if let Some(file_poller) = self.file_poller.take() {
             let _ = file_poller.join();
+        }
+        if let Some(write_poller) = self.write_poller.take() {
+            let _ = write_poller.join();
         }
     }
 }
@@ -781,6 +899,69 @@ mod tests {
         let ev = map_file_record(&rdonly_trunc).expect("well-formed record maps");
         assert_eq!(ev.kind, EventKind::FileWrite);
         assert_eq!(ev.fields["op"], "write");
+    }
+
+    /// Build a synthetic `FileWriteEvent` byte buffer: `kind` + `pid` + `bytes`
+    /// (u64, 8-aligned at offset 8) + `fd` + 16-byte `comm` (`#[repr(C)]`,
+    /// native-endian), matching the shared 40-byte layout.
+    fn make_write_record(kind: u32, pid: u32, nbytes: u64, fd: u32, comm: &[u8]) -> Vec<u8> {
+        let mut buf = vec![0u8; core::mem::size_of::<FileWriteEvent>()];
+        buf[0..4].copy_from_slice(&kind.to_ne_bytes());
+        buf[4..8].copy_from_slice(&pid.to_ne_bytes());
+        buf[8..16].copy_from_slice(&nbytes.to_ne_bytes());
+        buf[16..20].copy_from_slice(&fd.to_ne_bytes());
+        let cn = comm.len().min(16);
+        buf[20..20 + cn].copy_from_slice(&comm[..cn]);
+        buf
+    }
+
+    /// `map_write_record` maps a well-formed write record to a `FileWrite` event
+    /// carrying pid + image + `op == "write"` + the byte count + the raw fd, with
+    /// an EMPTY path placeholder (resolved later by `enrich_write` from procfs).
+    /// Unknown kind / truncated → `None`, no panic.
+    #[test]
+    fn map_write_record_maps_write_and_skips() {
+        let rec = make_write_record(KIND_WRITE, 4242, 8192, 7, b"dropper");
+        let ev = map_write_record(&rec).expect("well-formed write record maps");
+        assert_eq!(ev.kind, EventKind::FileWrite);
+        assert_eq!(ev.fields["pid"], 4242);
+        assert_eq!(ev.fields["image"], "dropper");
+        assert_eq!(ev.fields["op"], "write");
+        assert_eq!(ev.fields["bytes"], 8192);
+        assert_eq!(ev.fields["fd"], 7);
+        // Path is an empty placeholder until procfs enrichment resolves it.
+        assert_eq!(ev.fields["path"], "");
+
+        // Unknown kind → skipped.
+        let bad_kind = make_write_record(99, 1, 1, 1, b"x");
+        assert!(
+            map_write_record(&bad_kind).is_none(),
+            "unknown kind must be skipped"
+        );
+
+        // Truncated record → skipped, no panic.
+        assert!(map_write_record(&rec[..20]).is_none());
+        assert!(map_write_record(&[]).is_none());
+    }
+
+    /// `enrich_write` is inert for non-`FileWrite` events and for a `FileWrite`
+    /// missing the `fd` (it cannot resolve a path, and must never panic).
+    #[test]
+    fn enrich_write_is_inert_without_a_resolvable_fd() {
+        // Non-write event → untouched.
+        let mut proc_ev = SubstrateEvent {
+            kind: EventKind::ProcessExec,
+            ts: 1,
+            fields: serde_json::json!({ "pid": 1, "image": "x" }),
+        };
+        let before = proc_ev.fields.clone();
+        enrich_write(&mut proc_ev);
+        assert_eq!(proc_ev.fields, before, "non-write event must be untouched");
+
+        // FileWrite without an fd → no path added, no panic.
+        let mut no_fd = file_event(now_ms(), 1, "dropper", "", true, Some(10));
+        enrich_write(&mut no_fd);
+        assert_eq!(no_fd.fields["path"], "", "no fd → path stays empty");
     }
 
     /// Pure unit test for [`is_write_open`], covering each branch directly.
