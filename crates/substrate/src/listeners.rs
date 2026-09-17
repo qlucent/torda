@@ -12,6 +12,8 @@
 //!
 //! Modules never run these themselves — they read `snapshot.query("listeners")`.
 
+use std::collections::HashMap;
+
 /// One listening TCP socket.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Listener {
@@ -168,18 +170,61 @@ impl ListenerProvider for SsProvider {
     }
 }
 
+/// Parse `tasklist /fo csv /nh` into a PID→image-name map. Windows `netstat` only
+/// reports the PID; this resolves it to a process name so AI runtimes can be
+/// matched by name (not just a well-known port). Fields are quoted CSV; we need
+/// only the first two (`"ImageName","PID",…`), and `.exe` is stripped.
+pub fn parse_tasklist(out: &str) -> HashMap<u32, String> {
+    let mut map = HashMap::new();
+    for line in out.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let parts: Vec<&str> = line.split("\",\"").collect();
+        if parts.len() < 2 {
+            continue;
+        }
+        let name = parts[0].trim_start_matches('"');
+        let name = name
+            .strip_suffix(".exe")
+            .or_else(|| name.strip_suffix(".EXE"))
+            .unwrap_or(name);
+        if let Ok(pid) = parts[1].parse::<u32>() {
+            map.insert(pid, name.to_string());
+        }
+    }
+    map
+}
+
 #[cfg(target_os = "windows")]
 pub struct NetstatProvider;
 #[cfg(target_os = "windows")]
 impl ListenerProvider for NetstatProvider {
     fn listeners(&self) -> Vec<Listener> {
-        std::process::Command::new("netstat")
+        let mut listeners = std::process::Command::new("netstat")
             .args(["-ano", "-p", "TCP"])
             .output()
             .ok()
             .filter(|o| o.status.success())
             .map(|o| parse_netstat(&String::from_utf8_lossy(&o.stdout)))
-            .unwrap_or_default()
+            .unwrap_or_default();
+        // Best-effort PID→name resolution; if tasklist fails, PIDs stand alone.
+        let names = std::process::Command::new("tasklist")
+            .args(["/fo", "csv", "/nh"])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| parse_tasklist(&String::from_utf8_lossy(&o.stdout)))
+            .unwrap_or_default();
+        for l in &mut listeners {
+            if let Some(pid) = l.pid {
+                if let Some(name) = names.get(&pid) {
+                    l.process = Some(name.clone());
+                }
+            }
+        }
+        listeners
     }
 }
 
@@ -288,6 +333,19 @@ Dropbox   321 user   20u  IPv4 0x9abc      0t0  TCP 192.168.1.5:17500->1.2.3.4:4
         assert_eq!(l[0].port, 11434);
         assert_eq!(l[1].local_addr, "0.0.0.0"); // `*`
         assert_eq!(l[1].port, 8080);
+    }
+
+    #[test]
+    fn tasklist_maps_pid_to_name() {
+        let out = "\
+\"ollama.exe\",\"1234\",\"Console\",\"1\",\"120,000 K\"
+\"sshd.exe\",\"567\",\"Services\",\"0\",\"5,000 K\"
+\"System Idle Process\",\"0\",\"Services\",\"0\",\"8 K\"
+";
+        let m = parse_tasklist(out);
+        assert_eq!(m.get(&1234).map(String::as_str), Some("ollama")); // .exe stripped
+        assert_eq!(m.get(&567).map(String::as_str), Some("sshd"));
+        assert_eq!(m.get(&0).map(String::as_str), Some("System Idle Process"));
     }
 
     #[test]
