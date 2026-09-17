@@ -170,7 +170,15 @@ impl EbpfBus {
         let poll_stop = stop.clone();
         let poller = std::thread::Builder::new()
             .name("ebpf-ringbuf".to_string())
-            .spawn(move || drain_loop(&mut ring, &poll_tx, &poll_stop, map_record))
+            .spawn(move || {
+                drain_loop(
+                    &mut ring,
+                    &poll_tx,
+                    &poll_stop,
+                    map_record,
+                    enrich_proc_exec,
+                )
+            })
             .map_err(|e| anyhow::anyhow!("failed to spawn eBPF ring-buffer thread: {e}"))?;
 
         // Network drain thread: a SECOND thread draining `NET_EVENTS` with
@@ -180,7 +188,7 @@ impl EbpfBus {
         let net_stop = stop.clone();
         let net_poller = std::thread::Builder::new()
             .name("ebpf-net-ringbuf".to_string())
-            .spawn(move || drain_loop(&mut net_ring, &net_tx, &net_stop, map_net_record))
+            .spawn(move || drain_loop(&mut net_ring, &net_tx, &net_stop, map_net_record, no_enrich))
             .map_err(|e| anyhow::anyhow!("failed to spawn eBPF net ring-buffer thread: {e}"))?;
 
         // File drain thread: a THIRD thread draining `FILE_EVENTS` with
@@ -190,7 +198,15 @@ impl EbpfBus {
         let file_stop = stop.clone();
         let file_poller = std::thread::Builder::new()
             .name("ebpf-file-ringbuf".to_string())
-            .spawn(move || drain_loop(&mut file_ring, &file_tx, &file_stop, map_file_record))
+            .spawn(move || {
+                drain_loop(
+                    &mut file_ring,
+                    &file_tx,
+                    &file_stop,
+                    map_file_record,
+                    no_enrich,
+                )
+            })
             .map_err(|e| anyhow::anyhow!("failed to spawn eBPF file ring-buffer thread: {e}"))?;
 
         Ok(Arc::new(Self {
@@ -242,6 +258,7 @@ fn drain_loop(
     tx: &broadcast::Sender<SubstrateEvent>,
     stop: &AtomicBool,
     map: fn(&[u8]) -> Option<SubstrateEvent>,
+    enrich: fn(&mut SubstrateEvent),
 ) {
     while !stop.load(Ordering::Relaxed) {
         let mut drained_any = false;
@@ -249,13 +266,59 @@ fn drain_loop(
         while let Some(item) = ring.next() {
             drained_any = true;
             // Panic-free: a short/malformed record is skipped, never unwrapped.
-            if let Some(ev) = map(&item) {
+            if let Some(mut ev) = map(&item) {
+                // Userspace enrichment (the substrate is the only door). For the
+                // process ring this reads /proc to add the full exe path + cmdline;
+                // for the net/file rings it is a no-op.
+                enrich(&mut ev);
                 let _ = tx.send(ev); // ignore "no subscribers"
             }
             // `item` drops here, advancing the consumer position.
         }
         if !drained_any {
             std::thread::sleep(POLL_IDLE);
+        }
+    }
+}
+
+/// No-op enricher for rings that need no post-map I/O (network, file).
+fn no_enrich(_ev: &mut SubstrateEvent) {}
+
+/// Enrich a `ProcessExec` event from `/proc/<pid>`: replace the 16-byte `comm`
+/// `image` with the full executable path (fixes path-based rules and gives real
+/// forensics), and add the `cmdline`. Best-effort and keyed by pid — a fire-and-
+/// exit process may already be gone (`/proc/<pid>` missing), in which case the
+/// event keeps its `comm` image and carries no cmdline. Never touches exit/net/
+/// file events. Runs on the drain thread (substrate-side OS access, not a module).
+fn enrich_proc_exec(ev: &mut SubstrateEvent) {
+    if ev.kind != EventKind::ProcessExec {
+        return;
+    }
+    let Some(pid) = ev.fields.get("pid").and_then(serde_json::Value::as_u64) else {
+        return;
+    };
+    let Some(obj) = ev.fields.as_object_mut() else {
+        return;
+    };
+
+    // Full executable path via /proc/<pid>/exe (a symlink to the real binary).
+    if let Ok(exe) = std::fs::read_link(format!("/proc/{pid}/exe")) {
+        obj.insert(
+            "image".to_string(),
+            serde_json::Value::String(exe.to_string_lossy().into_owned()),
+        );
+    }
+
+    // Command line: /proc/<pid>/cmdline is NUL-separated argv.
+    if let Ok(raw) = std::fs::read(format!("/proc/{pid}/cmdline")) {
+        let cmdline = raw
+            .split(|&b| b == 0)
+            .filter(|s| !s.is_empty())
+            .map(|s| String::from_utf8_lossy(s))
+            .collect::<Vec<_>>()
+            .join(" ");
+        if !cmdline.is_empty() {
+            obj.insert("cmdline".to_string(), serde_json::Value::String(cmdline));
         }
     }
 }
