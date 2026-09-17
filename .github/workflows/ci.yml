@@ -97,3 +97,14 @@ jobs:
         run: cargo clippy --bin torda --features windows-etw -- -D warnings
       - name: cargo test (ETW backend, non-Administrator -> stub fallback)
         run: cargo test -p torda --features windows-etw
+
+  supply-chain:
+    name: supply-chain (cargo-deny)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Advisories (RustSec), license policy (Apache/FSL-compatible), bans, and
+      # source allow-list — see deny.toml. A vulnerable/yanked dep fails the merge.
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check advisories licenses bans sources
