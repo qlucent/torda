@@ -37,10 +37,12 @@ kill "$AGENT" 2>/dev/null; wait "$AGENT" 2>/dev/null
 
 echo
 echo "== RESULTS =="
-total=$(grep -c '"class_uid":1007' "$OUT" 2>/dev/null || echo 0)
-withcmd=$(grep -c '"cmdline"' "$OUT" 2>/dev/null || echo 0)
+# `grep -c` already prints 0 on no match (and exits 1) — capture it directly; a
+# `|| echo 0` would double-print and break the arithmetic below.
+total=$(grep -c '"class_uid":1007' "$OUT" 2>/dev/null); total=${total:-0}
+withcmd=$(grep -c '"cmdline"' "$OUT" 2>/dev/null); withcmd=${withcmd:-0}
 fullpath=$(grep -o '"image":"/[^"]*"' "$OUT" 2>/dev/null | sort -u | wc -l)
-rulehit=$(grep -c 'lolbin_suspicious_cmdline' "$OUT" 2>/dev/null || echo 0)
+rulehit=$(grep -c 'lolbin_suspicious_cmdline' "$OUT" 2>/dev/null); rulehit=${rulehit:-0}
 echo "Process Activity (1007) events : $total"
 echo "events carrying cmdline        : $withcmd"
 echo "distinct full-path images      : $fullpath"
