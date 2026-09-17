@@ -15,7 +15,9 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   each is **exposed** beyond loopback. Discovery only: the agent inventories your
   local AI footprint; scoring/posture is the backend's job. On Windows, listener
   PIDs are resolved to process names via `tasklist`, so runtimes match by name
-  (not just a well-known port).
+  (not just a well-known port). For Ollama, the substrate also probes the local
+  API for the runtime **version** and **loaded models** (the probe lives in the
+  substrate — the only door — never in a module).
 
 ## [0.1.0] — 2026-07-20
 

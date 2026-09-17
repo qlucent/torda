@@ -3,6 +3,7 @@
 //! host. P1 replaces `StubBus` with an aya/eBPF bus behind `linux-ebpf`,
 //! and `StubSnapshot` with real OS table providers — without touching any
 //! module, because they depend only on the core traits.
+pub mod ai;
 mod etw;
 pub mod files;
 pub mod listeners;
@@ -13,6 +14,7 @@ pub mod packages;
 #[cfg(all(target_os = "linux", feature = "linux-ebpf"))]
 mod ebpf;
 
+use ai::{discover_ai_runtimes, AiRuntime};
 use files::{default_file_provider, FileHashProvider, FileState};
 use listeners::{default_listener_provider, EmptyListenerProvider, Listener, ListenerProvider};
 use packages::{default_package_provider, Package, PackageProvider};
@@ -52,6 +54,7 @@ pub struct StubSnapshot {
     packages: Vec<Package>,
     files: Vec<FileState>,
     listeners: Vec<Listener>,
+    ai_runtimes: Vec<AiRuntime>,
 }
 
 impl StubSnapshot {
@@ -93,13 +96,18 @@ impl StubSnapshot {
     ) -> Arc<Self> {
         let hostname = read_hostname();
         let (os, os_version) = read_os_release();
+        // Collect listeners once, then discover AI runtimes from them (probing
+        // happens here, in the substrate — the only door — never in a module).
+        let listeners = listeners.listeners();
+        let ai_runtimes = discover_ai_runtimes(&listeners);
         Arc::new(Self {
             hostname,
             os,
             os_version,
             packages: packages.packages(),
             files: files.files(),
-            listeners: listeners.listeners(),
+            listeners,
+            ai_runtimes,
         })
     }
 }
@@ -144,6 +152,23 @@ impl SnapshotProvider for StubSnapshot {
                         "port": l.port,
                         "pid": l.pid,
                         "process": l.process,
+                    })
+                })
+                .collect(),
+            "ai_runtimes" => self
+                .ai_runtimes
+                .iter()
+                .map(|r| {
+                    serde_json::json!({
+                        "runtime": r.runtime,
+                        "process": r.process,
+                        "pid": r.pid,
+                        "proto": r.proto,
+                        "bind_addr": r.bind_addr,
+                        "port": r.port,
+                        "exposed": r.exposed,
+                        "version": r.version,
+                        "models": r.models,
                     })
                 })
                 .collect(),
