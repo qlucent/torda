@@ -5,6 +5,7 @@
 //! module, because they depend only on the core traits.
 mod etw;
 pub mod files;
+pub mod listeners;
 pub mod packages;
 // Linux eBPF backend: only compiled on a Linux `--features linux-ebpf` build,
 // where build.rs has produced the embedded kernel object. Task 2 fills the
@@ -13,6 +14,7 @@ pub mod packages;
 mod ebpf;
 
 use files::{default_file_provider, FileHashProvider, FileState};
+use listeners::{default_listener_provider, EmptyListenerProvider, Listener, ListenerProvider};
 use packages::{default_package_provider, Package, PackageProvider};
 use std::fs;
 use std::sync::Arc;
@@ -49,24 +51,45 @@ pub struct StubSnapshot {
     os_version: String,
     packages: Vec<Package>,
     files: Vec<FileState>,
+    listeners: Vec<Listener>,
 }
 
 impl StubSnapshot {
     pub fn new() -> Arc<Self> {
-        Self::with_providers(default_package_provider(), default_file_provider())
+        Self::with_all_providers(
+            default_package_provider(),
+            default_file_provider(),
+            default_listener_provider(),
+        )
     }
 
     /// Builds the snapshot reading packages from `provider` and files from the
     /// default file provider. Kept for callers/tests that only inject packages.
     pub fn with_provider(provider: Box<dyn PackageProvider>) -> Arc<Self> {
-        Self::with_providers(provider, default_file_provider())
+        Self::with_all_providers(
+            provider,
+            default_file_provider(),
+            Box::new(EmptyListenerProvider),
+        )
     }
 
-    /// Builds the snapshot from both providers. The provider seam keeps OS access
-    /// testable and lets tests inject deterministic package and file lists.
+    /// Builds the snapshot from the package + file providers (listeners empty).
+    /// The provider seam keeps OS access testable and lets tests inject
+    /// deterministic package and file lists.
     pub fn with_providers(
         packages: Box<dyn PackageProvider>,
         files: Box<dyn FileHashProvider>,
+    ) -> Arc<Self> {
+        Self::with_all_providers(packages, files, Box::new(EmptyListenerProvider))
+    }
+
+    /// Builds the snapshot from all three providers. Only `new()` wires the real
+    /// listener backend (which shells out); test constructors inject the empty
+    /// provider so no command runs.
+    pub fn with_all_providers(
+        packages: Box<dyn PackageProvider>,
+        files: Box<dyn FileHashProvider>,
+        listeners: Box<dyn ListenerProvider>,
     ) -> Arc<Self> {
         let hostname = read_hostname();
         let (os, os_version) = read_os_release();
@@ -76,6 +99,7 @@ impl StubSnapshot {
             os_version,
             packages: packages.packages(),
             files: files.files(),
+            listeners: listeners.listeners(),
         })
     }
 }
@@ -107,6 +131,19 @@ impl SnapshotProvider for StubSnapshot {
                         "path": f.path,
                         "sha256": f.sha256,
                         "exists": f.exists,
+                    })
+                })
+                .collect(),
+            "listeners" => self
+                .listeners
+                .iter()
+                .map(|l| {
+                    serde_json::json!({
+                        "proto": l.proto,
+                        "local_addr": l.local_addr,
+                        "port": l.port,
+                        "pid": l.pid,
+                        "process": l.process,
                     })
                 })
                 .collect(),
