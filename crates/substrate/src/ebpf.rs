@@ -286,10 +286,11 @@ fn no_enrich(_ev: &mut SubstrateEvent) {}
 
 /// Enrich a `ProcessExec` event from `/proc/<pid>`: replace the 16-byte `comm`
 /// `image` with the full executable path (fixes path-based rules and gives real
-/// forensics), and add the `cmdline`. Best-effort and keyed by pid — a fire-and-
-/// exit process may already be gone (`/proc/<pid>` missing), in which case the
-/// event keeps its `comm` image and carries no cmdline. Never touches exit/net/
-/// file events. Runs on the drain thread (substrate-side OS access, not a module).
+/// forensics), add the `cmdline`, and fill the `ppid` (parent pid) that the
+/// kernel program defers. Best-effort and keyed by pid — a fire-and-exit process
+/// may already be gone (`/proc/<pid>` missing), in which case the event keeps its
+/// `comm` image and carries no cmdline/ppid. Never touches exit/net/file events.
+/// Runs on the drain thread (substrate-side OS access, not a module).
 fn enrich_proc_exec(ev: &mut SubstrateEvent) {
     if ev.kind != EventKind::ProcessExec {
         return;
@@ -321,6 +322,39 @@ fn enrich_proc_exec(ev: &mut SubstrateEvent) {
             obj.insert("cmdline".to_string(), serde_json::Value::String(cmdline));
         }
     }
+
+    // Parent pid via /proc/<pid>/stat (field 4). The kernel program defers the
+    // in-kernel CO-RE parent lookup and emits `ppid = 0`, so `map_record` omits
+    // the key; we fill it here from procfs so ancestry correlation (corr module)
+    // has a parent to inherit suspicion from. SAME liveness caveat as the exe/
+    // cmdline reads: an already-exited process has no /proc entry and simply
+    // carries no ppid. Guarded on absence so a non-zero ppid a future kernel
+    // program supplies would already be present and WINS over this procfs
+    // fallback (kernel truth beats a best-effort userspace read).
+    if !obj.contains_key("ppid") {
+        if let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+            if let Some(ppid) = parse_ppid_from_stat(&stat) {
+                obj.insert("ppid".to_string(), serde_json::Value::from(ppid));
+            }
+        }
+    }
+}
+
+/// Parse the parent pid (field 4) out of the contents of a `/proc/<pid>/stat`
+/// line. The line is `pid (comm) state ppid ...`, and `comm` is a RAW task name
+/// that may itself contain spaces AND parentheses (e.g. `1234 ((sd-pam)) S 1 …`),
+/// which is the classic /proc/stat parsing trap. We therefore anchor on the LAST
+/// `)`: everything after it is a clean space-separated field list starting at
+/// `state`, so `ppid` is the SECOND whitespace token. Returns `Some(ppid)` only
+/// for a well-formed, NON-ZERO parent (a zero ppid — the no-parent/swapper
+/// sentinel, matching [`map_record`]'s `> 0` rule — yields `None`), and `None`
+/// (never a panic) for any malformed input.
+fn parse_ppid_from_stat(stat: &str) -> Option<u32> {
+    let after_comm = stat.rsplit_once(')')?.1;
+    let mut fields = after_comm.split_whitespace();
+    let _state = fields.next()?;
+    let ppid: u32 = fields.next()?.parse().ok()?;
+    (ppid > 0).then_some(ppid)
 }
 
 /// Map one raw ring-buffer record to a [`SubstrateEvent`], reusing the pure
@@ -336,8 +370,9 @@ fn enrich_proc_exec(ev: &mut SubstrateEvent) {
 ///   epoch). The kernel record carries no timestamp field, so this is the drain
 ///   time, not the exact exec/exit time.
 /// - `ppid` is `Some(ppid)` when non-zero, else `None`; the kernel program
-///   currently emits `0` (CO-RE parent lookup is deferred), so it is normally
-///   omitted. `cmdline` is always `None` (not collected by these tracepoints).
+///   currently emits `0` (CO-RE parent lookup is deferred), so at THIS stage it
+///   is omitted — [`enrich_proc_exec`] backfills it from `/proc/<pid>/stat` for
+///   exec events. `cmdline` is always `None` (not collected by these tracepoints).
 fn map_record(bytes: &[u8]) -> Option<SubstrateEvent> {
     if bytes.len() < core::mem::size_of::<ProcEvent>() {
         return None;
@@ -551,6 +586,32 @@ mod tests {
         let n = comm.len().min(16);
         buf[12..12 + n].copy_from_slice(&comm[..n]);
         buf
+    }
+
+    /// `parse_ppid_from_stat` extracts field 4 even when `comm` contains spaces
+    /// and parentheses (the classic /proc/stat trap), treats ppid 0 as absent,
+    /// and never panics on garbage.
+    #[test]
+    fn parse_ppid_from_stat_handles_the_comm_parens_trap() {
+        // Ordinary line.
+        assert_eq!(
+            parse_ppid_from_stat("1234 (bash) S 1000 1234 1000 0 -1 …"),
+            Some(1000)
+        );
+        // comm with an embedded space AND nested parens: anchoring on the LAST
+        // ')' is what makes `state ppid …` unambiguous.
+        assert_eq!(
+            parse_ppid_from_stat("42 (weird )( name) R 7 42 42 0 -1"),
+            Some(7)
+        );
+        // A kernel thread whose comm is itself parenthesised.
+        assert_eq!(parse_ppid_from_stat("77 ((sd-pam)) S 1 77 1"), Some(1));
+        // ppid 0 (swapper / no parent) → None, matching map_record's `> 0` rule.
+        assert_eq!(parse_ppid_from_stat("1 (systemd) S 0 1 1 0"), None);
+        // Malformed / empty → None, never a panic.
+        assert_eq!(parse_ppid_from_stat("garbage with no parens"), None);
+        assert_eq!(parse_ppid_from_stat("123 (only-comm)"), None);
+        assert_eq!(parse_ppid_from_stat(""), None);
     }
 
     /// The `kind` discriminant selects the event: `KIND_EXEC` → `ProcessExec`,
