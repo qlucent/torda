@@ -21,9 +21,18 @@
 //!   `PATH_CAP`). CO-RE-free (reads the syscall's user `filename` argument via
 //!   `bpf_probe_read_user_str_bytes`, never a `struct file` field). High-volume.
 //!
+//! Byte-level file write (`WRITE_EVENTS` ring, [`FileWriteEvent`]):
+//! - `sys_enter_write`: on `write(2)` entry, emits a `KIND_WRITE` record (pid +
+//!   comm + fd + requested byte count) — but ONLY the FIRST write per `(pid, fd)`,
+//!   deduped in-kernel via the bounded [`WRITE_SEEN`] LRU map so the write
+//!   firehose collapses to one "this file was written" signal per open file. The
+//!   path is NOT resolved here (write names only an fd); userspace resolves it
+//!   from `/proc/<pid>/fd/<fd>`.
+//!
 //! The userspace `EbpfBus` loader (behind `torda-substrate`'s `linux-ebpf`
-//! feature) drains all three maps and republishes the events onto the shared
-//! `EventBus` as `ProcessExec` / `ProcessExit` / `NetConnect` / `FileOpen`.
+//! feature) drains all four maps and republishes the events onto the shared
+//! `EventBus` as `ProcessExec` / `ProcessExit` / `NetConnect` / `FileOpen` /
+//! `FileWrite`.
 //!
 //! Builds ONLY for `bpfel-unknown-none` (see `.cargo/config.toml`); it is
 //! `no_std`/`no_main` and excluded from the workspace, so the host build never
@@ -37,11 +46,12 @@ use aya_ebpf::{
         bpf_probe_read_user_str_bytes,
     },
     macros::{map, tracepoint},
-    maps::RingBuf,
+    maps::{LruHashMap, RingBuf},
     programs::TracePointContext,
 };
 use torda_substrate_ebpf_common::{
-    FileEvent, NetEvent, ProcEvent, KIND_CONNECT, KIND_EXEC, KIND_EXIT, KIND_OPEN, PATH_CAP,
+    FileEvent, FileWriteEvent, NetEvent, ProcEvent, KIND_CONNECT, KIND_EXEC, KIND_EXIT, KIND_OPEN,
+    KIND_WRITE, PATH_CAP,
 };
 
 /// `AF_INET` (IPv4). The only address family captured in v0; every other family
@@ -66,6 +76,19 @@ const OPENAT_FILENAME_OFF: usize = 24;
 /// `syscalls:sys_enter_openat` tracepoint format (arg2 = offset 16 + 2*8 = 32).
 const OPENAT_FLAGS_OFF: usize = 32;
 
+/// Byte offset of the 1st `write(2)` argument (`unsigned int fd`) within the
+/// `syscalls:sys_enter_write` tracepoint format (arg0 = offset 16).
+const WRITE_FD_OFF: usize = 16;
+/// Byte offset of the 3rd `write(2)` argument (`size_t count`) within the
+/// `syscalls:sys_enter_write` tracepoint format (arg2 = offset 16 + 2*8 = 32).
+const WRITE_COUNT_OFF: usize = 32;
+
+/// Max live entries in the [`WRITE_SEEN`] dedup map. Bounded so the map can never
+/// grow without limit; at the cap the kernel LRU-evicts the least-recently-seen
+/// key, which merely means a long-lived fd's write may be re-emitted once after
+/// its key ages out — acceptable for a "file was written" signal.
+const WRITE_SEEN_MAX: u32 = 10_240;
+
 /// Ring buffer carrying [`ProcEvent`]s to userspace. 256 KiB (a power-of-2
 /// multiple of the page size, as the kernel requires). Shared by BOTH the exec
 /// and exit tracepoints.
@@ -81,6 +104,20 @@ static NET_EVENTS: RingBuf = RingBuf::with_byte_size(256 * 1024, 0);
 /// [`EVENTS`]/[`NET_EVENTS`]: the file sensor never shares another ring or layout.
 #[map]
 static FILE_EVENTS: RingBuf = RingBuf::with_byte_size(256 * 1024, 0);
+
+/// Ring buffer carrying [`FileWriteEvent`]s to userspace. A SEPARATE 256 KiB ring:
+/// the byte-level write sensor never shares another ring or layout.
+#[map]
+static WRITE_EVENTS: RingBuf = RingBuf::with_byte_size(256 * 1024, 0);
+
+/// Dedup set for the write sensor: `(pid << 32 | fd) -> 1`. A key present means a
+/// write for that `(pid, fd)` has already been emitted, so subsequent writes to
+/// the same open file are dropped in-kernel — collapsing the `write(2)` firehose
+/// to ONE event per open file. LRU-bounded ([`WRITE_SEEN_MAX`]) so it is never
+/// unbounded. Limitation (documented): a closed-then-reused fd whose old key is
+/// still cached will miss the new file's first write until the key ages out.
+#[map]
+static WRITE_SEEN: LruHashMap<u64, u8> = LruHashMap::with_max_entries(WRITE_SEEN_MAX, 0);
 
 /// `sched_process_exec` tracepoint entry point. Returns 0 on success; a non-zero
 /// return only means "we dropped this event" (e.g. ring full) and never fails
@@ -264,6 +301,57 @@ fn try_sys_enter_openat(ctx: TracePointContext) -> Result<u32, u32> {
         flags: flags as u32,
         comm,
         path,
+    });
+    entry.submit(0);
+    Ok(0)
+}
+
+/// `syscalls:sys_enter_write` tracepoint entry point. Same drop-not-fail contract
+/// as the other handlers: observational, so any non-zero return only means "we
+/// dropped this event" and never affects the `write(2)` call.
+#[tracepoint]
+pub fn sys_enter_write(ctx: TracePointContext) -> u32 {
+    match try_sys_enter_write(ctx) {
+        Ok(ret) => ret,
+        Err(ret) => ret,
+    }
+}
+
+/// Read the `write(2)` `fd` + `count` and, for the FIRST write seen on a given
+/// `(pid, fd)`, push a [`FileWriteEvent`] onto [`WRITE_EVENTS`]. The in-kernel
+/// [`WRITE_SEEN`] LRU dedup collapses the high-volume write stream to one event
+/// per open file (a dropper writing a payload fires once, not per 4 KiB chunk).
+/// CO-RE-free: only the syscall's scalar `fd`/`count` args are read; the path is
+/// resolved later in userspace from `/proc/<pid>/fd/<fd>`. Ring full → `Err(1)`
+/// (dropped), never a syscall failure.
+fn try_sys_enter_write(ctx: TracePointContext) -> Result<u32, u32> {
+    // arg0 `fd` and arg2 `count`, read from the tracepoint format buffer. A read
+    // failure for `count` is non-fatal (0); a bad `fd` read drops the event.
+    let fd: u64 = unsafe { ctx.read_at(WRITE_FD_OFF).map_err(|_| 1u32)? };
+    let count: u64 = unsafe { ctx.read_at(WRITE_COUNT_OFF) }.unwrap_or(0);
+
+    let pid = (bpf_get_current_pid_tgid() >> 32) as u32;
+    // Dedup key: pid in the high 32 bits, fd in the low 32. Only the FIRST write
+    // per (pid, fd) is emitted; the rest are dropped in-kernel.
+    let key = ((pid as u64) << 32) | (fd & 0xffff_ffff);
+    if unsafe { WRITE_SEEN.get(&key) }.is_some() {
+        return Ok(0);
+    }
+    // Mark seen BEFORE reserving/emitting so a full ring still records the intent
+    // (we do not want a dropped emit to let every subsequent write re-attempt).
+    let _ = WRITE_SEEN.insert(&key, &1u8, 0);
+
+    let mut entry = match WRITE_EVENTS.reserve::<FileWriteEvent>(0) {
+        Some(entry) => entry,
+        None => return Err(1),
+    };
+    let comm = bpf_get_current_comm().unwrap_or([0u8; 16]);
+    entry.write(FileWriteEvent {
+        kind: KIND_WRITE,
+        pid,
+        bytes: count,
+        fd: fd as u32,
+        comm,
     });
     entry.submit(0);
     Ok(0)

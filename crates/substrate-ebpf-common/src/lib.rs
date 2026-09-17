@@ -160,3 +160,60 @@ pub struct FileEvent {
 // it directly out of the ring buffer. Only compiled for the userspace side.
 #[cfg(feature = "user")]
 unsafe impl aya::Pod for FileEvent {}
+
+/// A [`FileWriteEvent`] with `kind == KIND_WRITE`: emitted by the
+/// `syscalls:sys_enter_write` tracepoint on the FIRST `write(2)` seen for a given
+/// `(pid, fd)` pair (the kernel program dedups via a bounded LRU map, so the
+/// high-volume write stream is collapsed to one "this file was written" signal
+/// per open file). This is the byte-level write observation — the Linux analog of
+/// the ETW Kernel-File Write event — carrying the write LENGTH.
+pub const KIND_WRITE: u32 = 0;
+
+/// One byte-level file-write observation, pushed onto the *separate*
+/// `WRITE_EVENTS` ring buffer by the kernel program and read verbatim by the
+/// userspace loader. A DISTINCT wire struct from
+/// [`ProcEvent`]/[`NetEvent`]/[`FileEvent`]: the four sensor classes never share a
+/// ring buffer or a layout.
+///
+/// `#[repr(C)]` pins the field order/layout so both sides agree byte-for-byte.
+/// The struct is 40 bytes: `kind`/`pid` (two `u32`s, 8 bytes) place the `u64`
+/// `bytes` on its natural 8-byte boundary at offset 8, then `fd` (`u32`) and the
+/// 16-byte `comm` — no INTERIOR padding (four trailing pad bytes round the size to
+/// the 8-byte alignment, which the loader never reads).
+///
+/// The write path is NOT carried in-kernel: `write(2)` names only the `fd`, and an
+/// in-kernel `fd -> path` traversal is deliberately avoided. The userspace loader
+/// resolves it best-effort from `/proc/<pid>/fd/<fd>` (the same procfs-enrichment
+/// approach used for exec `image`/`ppid`), so an fd closed before that read yields
+/// no path.
+///
+/// Fields are cheap to obtain in-kernel:
+/// - `kind`: always [`KIND_WRITE`] in v0 (the discriminant mirrors the other
+///   sensor structs so the layout is forward-compatible).
+/// - `pid`: the process (thread-group) id, `bpf_get_current_pid_tgid() >> 32`.
+/// - `bytes`: the `write(2)` `count` argument (the REQUESTED write length; for a
+///   regular file this equals the bytes written on success). Read at syscall
+///   ENTRY, so it is intent-accurate, not a post-hoc short-write count.
+/// - `fd`: the `write(2)` `fd` argument, for userspace `/proc/<pid>/fd` resolution.
+/// - `comm`: the 16-byte task command name, `bpf_get_current_comm()`.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct FileWriteEvent {
+    /// Event discriminant: [`KIND_WRITE`].
+    pub kind: u32,
+    /// Process (thread-group) id.
+    pub pid: u32,
+    /// The `write(2)` `count` argument (requested write length, bytes).
+    pub bytes: u64,
+    /// The `write(2)` `fd` argument (resolved to a path in userspace via procfs).
+    pub fd: u32,
+    /// Task command name (`TASK_COMM_LEN` = 16 bytes, NUL-padded).
+    pub comm: [u8; 16],
+}
+
+// SAFETY: `FileWriteEvent` is `#[repr(C)]` and contains only integer/array POD
+// fields; `bytes` (u64) sits on its natural 8-byte boundary (offset 8) so there
+// is no interior padding, and the loader reads each field by canonical offset, so
+// it may be read directly out of the ring buffer. Only compiled for userspace.
+#[cfg(feature = "user")]
+unsafe impl aya::Pod for FileWriteEvent {}
