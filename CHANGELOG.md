@@ -13,7 +13,9 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `ListenerProvider`) and reports locally-running AI runtimes — Ollama, LM Studio,
   llama.cpp, vLLM, and more — as **AI Inventory Info** (`9004`), including whether
   each is **exposed** beyond loopback. Discovery only: the agent inventories your
-  local AI footprint; scoring/posture is the backend's job.
+  local AI footprint; scoring/posture is the backend's job. On Windows, listener
+  PIDs are resolved to process names via `tasklist`, so runtimes match by name
+  (not just a well-known port).
 
 ## [0.1.0] — 2026-07-20
 
