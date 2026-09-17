@@ -1,0 +1,55 @@
+# Supply-chain policy for the Torda workspace, enforced in CI (`cargo deny check`).
+# A security product must hold its own dependency tree to the bar it sells:
+# vulnerable/yanked deps fail the merge, and dependency licenses must stay
+# compatible with the project's Apache-2.0 / FSL-1.1 split (see LICENSING.md).
+
+[advisories]
+version = 2
+# RustSec advisory DB: deny anything with a known vulnerability or that is yanked.
+yanked = "deny"
+# Add IDs here (with a comment + expiry) only for a reviewed, accepted advisory.
+ignore = []
+
+[licenses]
+version = 2
+confidence-threshold = 0.9
+# Permissive licenses compatible with redistribution under our Apache/FSL model.
+# (These are dependency licenses, not the project's own — FSL crates use a
+# license-file and are not consumed as dependencies here.)
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-DFS-2016",
+    "Unicode-3.0",
+    "MPL-2.0",
+    "CC0-1.0",
+    "BSL-1.0",
+]
+# First-party FSL crates declare their license via a copied `LICENSE` file
+# (FSL-1.1-ALv2, per LICENSING.md), not an SPDX field — allow it, scoped to our
+# own crates only (never blanket-allowing FSL for a third-party dependency).
+exceptions = [
+    { name = "torda-findings-engine", allow = ["FSL-1.1-ALv2"] },
+    { name = "torda-ingest", allow = ["FSL-1.1-ALv2"] },
+    { name = "torda-control-server", allow = ["FSL-1.1-ALv2"] },
+    { name = "torda-feed-live", allow = ["FSL-1.1-ALv2"] },
+]
+
+[bans]
+# A copyleft/unknown license or a surprise dependency should be visible, not fatal
+# by default — tighten to "deny" once the tree is clean and pinned.
+multiple-versions = "warn"
+wildcards = "warn"
+# Crates we never want pulled in (name + reason) go here.
+deny = []
+
+[sources]
+# Only crates.io; a dependency from an unexpected registry or git host fails.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
