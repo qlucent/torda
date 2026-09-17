@@ -19,11 +19,25 @@
 //! independent verdicts. procmon/netmon still emit their own records — this is a
 //! DISTINCT class 9002 record, not a duplicate.
 //!
+//! # Ancestry inheritance
+//! A pid-only join misses the common evasion where a suspicious process forks a
+//! benign-looking child (e.g. a shell) that does the actual connect/write. At
+//! exec time each process therefore INHERITS its immediate parent's verdict when
+//! that parent is suspicious (`suspicious_ancestor`), taking the STRONGER of its
+//! own and the ancestor's severity. Because the parent's own context was already
+//! elevated at ITS exec, one hop propagates the whole lineage transitively at
+//! O(1) per exec — no tree walk — and every downstream connect/write/read rule
+//! then fires for the child unchanged. Requires the exec stream to carry `ppid`;
+//! when it does not, behaviour degrades cleanly to the pid-only join.
+//!
 //! # Honest limits
-//! The join is by pid alone, on the ordered stub bus: an exec must be seen
-//! before the connection to attribute it. A `NetConnect` for a pid with no prior
-//! exec (or one already evicted by the cap) is emitted `attributed: false` with
-//! a connection-only verdict — never guessed.
+//! The join is by pid (with the one-hop ancestry lift above), on the ordered stub
+//! bus: an exec must be seen before the connection to attribute it. A `NetConnect`
+//! for a pid with no prior exec (or one already evicted by the cap) is emitted
+//! `attributed: false` with a connection-only verdict — never guessed. Ancestry
+//! inheritance needs the PARENT's exec to have been seen and still retained (live
+//! map or the recently-exited window); a parent evicted or long-exited is not
+//! reconstructed.
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -36,6 +50,14 @@ use torda_ocsf::{class, Device, Metadata, OcsfEnvelope};
 
 /// Stable identifier of the process↔connection correlated rule.
 const CORRELATED_RULE: &str = "suspicious_process_suspicious_connection";
+
+/// Stable identifier of the ancestry-inheritance marker. A process inherits a
+/// suspicious ancestor's verdict at exec time (see [`handle_exec`]); this rule is
+/// added to the child's exec detections so the correlated record explains WHY the
+/// child counts as suspicious (its ancestor is), and the child's later
+/// connect/write/read then satisfies the same strict-AND correlated rules — a
+/// chain that crosses the fork/exec boundary the pid-only join would miss.
+const ANCESTRY_RULE: &str = "suspicious_ancestor";
 
 /// Stable identifier of the process↔file-write correlated rule — the file
 /// analog of [`CORRELATED_RULE`]. Fires IFF BOTH halves are suspicious: the
@@ -1490,6 +1512,46 @@ fn handle_exec(
     if chain.remove(&key).is_some() {
         chain_len.store(chain.len(), Ordering::Relaxed);
     }
+
+    // ANCESTRY INHERITANCE (P0-1): a benign-looking exec whose PARENT is suspicious
+    // inherits the parent's verdict, so the child's own later connect/write/read
+    // satisfies the correlated rules and a fork/exec-crossing chain is caught. This
+    // is a SINGLE hop by construction: the parent's own context was ALREADY elevated
+    // at ITS exec if ITS parent was suspicious, so checking the immediate parent
+    // propagates the whole lineage transitively at O(1) per exec — no tree walk.
+    //
+    // The parent is looked up in the LIVE map first, then the recently-exited window
+    // (a parent that forked-then-exited, or a reparent, still attributes for
+    // EXITED_RETENTION). We extract OWNED values (pid, image, severity) so no borrow
+    // of `map`/`recently_exited` outlives this expression into the mutations below.
+    // pid reuse is already neutralised: a fresh exec for the parent's pid supersedes
+    // its stale context (recently_exited cleared + map overwritten at exec), so we
+    // can never inherit from a different, already-replaced process.
+    let ppid = ev.fields.get("ppid").and_then(serde_json::Value::as_u64);
+    let inherited: Option<(u64, String, u8)> = ppid.and_then(|pp| {
+        let ppk = pp as u32;
+        let pctx = map
+            .get(&ppk)
+            .or_else(|| recently_exited.get(&ppk).map(|(c, _)| c))?;
+        // Only INHERIT when the parent's context is itself suspicious (above the
+        // informational floor). A benign parent contributes nothing.
+        (pctx.exec_severity > SEV_INFORMATIONAL)
+            .then(|| (pp, pctx.image.clone(), pctx.exec_severity))
+    });
+    let (exec_severity, exec_detections) = match inherited {
+        Some((pp, pimage, psev)) => {
+            let mut det = exec_detections;
+            det.push(serde_json::json!({
+                "rule": ANCESTRY_RULE,
+                "reason": format!("inherited suspicion from ancestor '{pimage}' (pid {pp})"),
+            }));
+            // Effective severity is the STRONGER of the child's own verdict and the
+            // ancestor's — inheritance can only raise, never lower.
+            (a.severity_id.max(psev), det)
+        }
+        None => (a.severity_id, exec_detections),
+    };
+
     // Bounded map: at the cap (and only when inserting a NEW pid), evict the
     // OLDEST context and count it — never a silent drop, never unbounded growth.
     if !map.contains_key(&key) && map.len() >= MAX_TRACKED {
@@ -1505,7 +1567,7 @@ fn handle_exec(
         key,
         ProcContext {
             image: image.to_string(),
-            exec_severity: a.severity_id,
+            exec_severity,
             exec_detections: exec_detections.clone(),
             exec_ts: ev.ts,
         },
@@ -1526,7 +1588,7 @@ fn handle_exec(
                 pid,
                 true,
                 image,
-                a.severity_id,
+                exec_severity,
                 &exec_detections,
                 &pc.daddr,
                 pc.dport,
@@ -1568,7 +1630,7 @@ fn handle_exec(
                 pid,
                 true,
                 image,
-                a.severity_id,
+                exec_severity,
                 &exec_detections,
                 &pfw.path,
             ) {
@@ -4347,5 +4409,231 @@ mod tests {
             exfils(&emitted).is_empty(),
             "halves outside the window never chain"
         );
+    }
+
+    // ---------- A. ancestry inheritance (P0-1) ----------
+
+    /// A1. A suspicious parent forks a BENIGN child (a shell) that makes the
+    /// suspicious connection. The child's own verdict is Informational, but it
+    /// inherits pid-7's suspicion at exec → the correlated rule fires, attributed
+    /// to the CHILD (pid 9), carrying a `suspicious_ancestor` marker. This is the
+    /// fork/exec-crossing chain the pid-only join would miss.
+    #[tokio::test]
+    async fn ancestry_benign_child_of_suspicious_parent_inherits_and_fires() {
+        let emitter = Arc::new(CapturingEmitter::default());
+        let bus = StubBus::new();
+        let mut m = CorrModule::new();
+        m.init(make_ctx(bus.clone(), emitter.clone()))
+            .await
+            .unwrap();
+        m.start().await.unwrap();
+
+        bus.publish(exec_event(
+            1,
+            serde_json::json!({ "pid": 7, "image": "/tmp/nc" }),
+        ));
+        bus.publish(exec_event(
+            2,
+            serde_json::json!({ "pid": 9, "ppid": 7, "image": "/bin/bash" }),
+        ));
+        bus.publish(net_event(
+            3,
+            serde_json::json!({ "pid": 9, "image": "bash", "daddr": "203.0.113.1", "dport": 4444 }),
+        ));
+
+        wait_until(&emitter, 1).await;
+        m.stop().await.unwrap();
+
+        let emitted = emitter.emitted.lock().unwrap();
+        assert_eq!(
+            emitted.len(),
+            1,
+            "one correlated record for the child connect"
+        );
+        let r = &emitted[0];
+        assert_eq!(r.class_uid, class::CORRELATED_ACTIVITY);
+        // Inherited suspicion + suspicious connection → correlated High.
+        assert_eq!(r.severity_id, SEV_HIGH);
+        assert!(rule_names(&r.data["detections"]).contains(&CORRELATED_RULE.to_string()));
+        // Attributed to the CHILD, not the parent.
+        assert_eq!(r.data["process"]["attributed"], true);
+        assert_eq!(r.data["process"]["pid"], 9);
+        assert_eq!(r.data["process"]["image"], "/bin/bash");
+        // The process side explains WHY a benign shell counts as suspicious.
+        let proc_rules = rule_names(&r.data["process"]["detections"]);
+        assert!(
+            proc_rules.contains(&ANCESTRY_RULE.to_string()),
+            "child carries the suspicious_ancestor marker, got {proc_rules:?}"
+        );
+    }
+
+    /// A2. A BENIGN parent's benign child gets NO inheritance: the child's connect
+    /// emits its connection-only verdict with neither the correlated rule nor a
+    /// `suspicious_ancestor` marker. Inheritance only ever RAISES from a suspicious
+    /// ancestor — a benign parent contributes nothing.
+    #[tokio::test]
+    async fn ancestry_benign_parent_gives_no_inheritance() {
+        let emitter = Arc::new(CapturingEmitter::default());
+        let bus = StubBus::new();
+        let mut m = CorrModule::new();
+        m.init(make_ctx(bus.clone(), emitter.clone()))
+            .await
+            .unwrap();
+        m.start().await.unwrap();
+
+        bus.publish(exec_event(
+            1,
+            serde_json::json!({ "pid": 7, "image": "/usr/bin/echo" }),
+        ));
+        bus.publish(exec_event(
+            2,
+            serde_json::json!({ "pid": 9, "ppid": 7, "image": "/bin/bash" }),
+        ));
+        bus.publish(net_event(
+            3,
+            serde_json::json!({ "pid": 9, "image": "bash", "daddr": "203.0.113.1", "dport": 4444 }),
+        ));
+
+        wait_until(&emitter, 1).await;
+        m.stop().await.unwrap();
+
+        let emitted = emitter.emitted.lock().unwrap();
+        assert_eq!(emitted.len(), 1);
+        let r = &emitted[0];
+        // Connection's OWN verdict, not correlated-High.
+        let net_sev = torda_mod_netmon::assess("203.0.113.1", 4444).severity_id;
+        assert_eq!(r.severity_id, net_sev);
+        assert!(!rule_names(&r.data["detections"]).contains(&CORRELATED_RULE.to_string()));
+        assert!(!rule_names(&r.data["process"]["detections"]).contains(&ANCESTRY_RULE.to_string()));
+    }
+
+    /// A3. Reparenting: the suspicious parent EXITS before the child execs, so it
+    /// lives only in the recently-exited window. Inheritance still resolves against
+    /// that window → the chain fires.
+    #[tokio::test]
+    async fn ancestry_inherits_from_recently_exited_parent() {
+        let emitter = Arc::new(CapturingEmitter::default());
+        let bus = StubBus::new();
+        let mut m = CorrModule::new();
+        m.init(make_ctx(bus.clone(), emitter.clone()))
+            .await
+            .unwrap();
+        m.start().await.unwrap();
+
+        bus.publish(exec_event(
+            1,
+            serde_json::json!({ "pid": 7, "image": "/tmp/nc" }),
+        ));
+        bus.publish(exit_event(2, serde_json::json!({ "pid": 7 })));
+        bus.publish(exec_event(
+            3,
+            serde_json::json!({ "pid": 9, "ppid": 7, "image": "/bin/bash" }),
+        ));
+        bus.publish(net_event(
+            4,
+            serde_json::json!({ "pid": 9, "image": "bash", "daddr": "203.0.113.1", "dport": 4444 }),
+        ));
+
+        wait_until(&emitter, 1).await;
+        m.stop().await.unwrap();
+
+        let emitted = emitter.emitted.lock().unwrap();
+        assert_eq!(emitted.len(), 1);
+        let r = &emitted[0];
+        assert_eq!(r.severity_id, SEV_HIGH);
+        assert!(rule_names(&r.data["detections"]).contains(&CORRELATED_RULE.to_string()));
+        assert_eq!(r.data["process"]["pid"], 9);
+        assert!(rule_names(&r.data["process"]["detections"]).contains(&ANCESTRY_RULE.to_string()));
+    }
+
+    /// A4. Parent PID REUSE must not mis-attribute: the suspicious parent (pid 7)
+    /// exits and pid 7 is then reused by a BENIGN process. A child naming ppid=7
+    /// now resolves to the NEW benign occupant (a fresh exec cleared the retained
+    /// suspicious context), so it inherits nothing → connect-only.
+    #[tokio::test]
+    async fn ancestry_parent_pid_reuse_does_not_misattribute() {
+        let emitter = Arc::new(CapturingEmitter::default());
+        let bus = StubBus::new();
+        let mut m = CorrModule::new();
+        m.init(make_ctx(bus.clone(), emitter.clone()))
+            .await
+            .unwrap();
+        m.start().await.unwrap();
+
+        bus.publish(exec_event(
+            1,
+            serde_json::json!({ "pid": 7, "image": "/tmp/nc" }),
+        ));
+        bus.publish(exit_event(2, serde_json::json!({ "pid": 7 })));
+        // pid 7 reused by a benign process — supersedes the retained suspicious ctx.
+        bus.publish(exec_event(
+            3,
+            serde_json::json!({ "pid": 7, "image": "/usr/bin/echo" }),
+        ));
+        bus.publish(exec_event(
+            4,
+            serde_json::json!({ "pid": 9, "ppid": 7, "image": "/bin/bash" }),
+        ));
+        bus.publish(net_event(
+            5,
+            serde_json::json!({ "pid": 9, "image": "bash", "daddr": "203.0.113.1", "dport": 4444 }),
+        ));
+
+        wait_until(&emitter, 1).await;
+        m.stop().await.unwrap();
+
+        let emitted = emitter.emitted.lock().unwrap();
+        assert_eq!(emitted.len(), 1);
+        let r = &emitted[0];
+        let net_sev = torda_mod_netmon::assess("203.0.113.1", 4444).severity_id;
+        assert_eq!(
+            r.severity_id, net_sev,
+            "no inheritance from a reused benign pid"
+        );
+        assert!(!rule_names(&r.data["detections"]).contains(&CORRELATED_RULE.to_string()));
+        assert!(!rule_names(&r.data["process"]["detections"]).contains(&ANCESTRY_RULE.to_string()));
+    }
+
+    /// A5. Transitivity via single hops: a suspicious grandparent (pid 5) → benign
+    /// parent (pid 7, inherits at ITS exec) → benign child (pid 9). The child checks
+    /// only its IMMEDIATE parent, but because pid 7 was already elevated the whole
+    /// lineage propagates — the child's connect fires correlated.
+    #[tokio::test]
+    async fn ancestry_is_transitive_through_an_elevated_parent() {
+        let emitter = Arc::new(CapturingEmitter::default());
+        let bus = StubBus::new();
+        let mut m = CorrModule::new();
+        m.init(make_ctx(bus.clone(), emitter.clone()))
+            .await
+            .unwrap();
+        m.start().await.unwrap();
+
+        bus.publish(exec_event(
+            1,
+            serde_json::json!({ "pid": 5, "image": "/tmp/nc" }),
+        ));
+        bus.publish(exec_event(
+            2,
+            serde_json::json!({ "pid": 7, "ppid": 5, "image": "/bin/bash" }),
+        ));
+        bus.publish(exec_event(
+            3,
+            serde_json::json!({ "pid": 9, "ppid": 7, "image": "/bin/bash" }),
+        ));
+        bus.publish(net_event(
+            4,
+            serde_json::json!({ "pid": 9, "image": "bash", "daddr": "203.0.113.1", "dport": 4444 }),
+        ));
+
+        wait_until(&emitter, 1).await;
+        m.stop().await.unwrap();
+
+        let emitted = emitter.emitted.lock().unwrap();
+        assert_eq!(emitted.len(), 1);
+        let r = &emitted[0];
+        assert_eq!(r.severity_id, SEV_HIGH);
+        assert!(rule_names(&r.data["detections"]).contains(&CORRELATED_RULE.to_string()));
+        assert_eq!(r.data["process"]["pid"], 9);
+        assert!(rule_names(&r.data["process"]["detections"]).contains(&ANCESTRY_RULE.to_string()));
     }
 }
