@@ -4,19 +4,27 @@
 //! canonical score from the control weight. Reads the snapshot; never the OS.
 use async_trait::async_trait;
 use std::collections::HashSet;
+use std::time::Duration;
 use torda_compliance::control::{evaluate, Snapshot};
 use torda_compliance::controls::builtin_controls;
 use torda_compliance::framework::{profile_by_name, FrameworkProfile};
 use torda_compliance::policy::{apply_overrides, Policy};
 use torda_compliance::record::to_records;
-use torda_core::{Module, ModuleCtx, ModuleHealth, ModuleId};
-use torda_ocsf::{class, OcsfEnvelope};
+use torda_core::{ChangeGate, Module, ModuleCtx, ModuleHealth, ModuleId};
+use torda_ocsf::class;
+
+/// Default compliance refresh cadence in a daemon: hourly (config posture changes
+/// slowly). Config `[refresh] compliance = <secs>` overrides; `0` = off/one-shot.
+const DEFAULT_COMPLIANCE_INTERVAL: Duration = Duration::from_secs(3600);
 
 /// Evaluates the compliance control library over the snapshot and emits one OCSF
-/// Compliance Finding record for the whole run.
+/// Compliance Finding record — at startup and, in a daemon, on each refresh when
+/// the pass/fail set CHANGED (gated so an unchanged posture does not re-emit).
 pub struct ComplianceModule {
     ctx: Option<ModuleCtx>,
     policy: Policy,
+    gate: ChangeGate,
+    interval: Option<Duration>,
 }
 
 impl ComplianceModule {
@@ -26,29 +34,19 @@ impl ComplianceModule {
 
     /// Builds the module with an org policy (framework selection + control overrides).
     pub fn with_policy(policy: Policy) -> Self {
-        Self { ctx: None, policy }
-    }
-}
-
-impl Default for ComplianceModule {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-#[async_trait]
-impl Module for ComplianceModule {
-    fn id(&self) -> ModuleId {
-        "compliance".to_string()
+        Self {
+            ctx: None,
+            policy,
+            gate: ChangeGate::new(),
+            interval: Some(DEFAULT_COMPLIANCE_INTERVAL),
+        }
     }
 
-    async fn init(&mut self, ctx: ModuleCtx) -> anyhow::Result<()> {
-        self.ctx = Some(ctx);
-        Ok(())
-    }
-
-    async fn start(&mut self) -> anyhow::Result<()> {
-        let ctx = self.ctx.as_ref().expect("init before start");
+    /// Evaluate the control library over the current snapshot and emit the
+    /// finding set, gated so an unchanged posture does not re-emit on a periodic
+    /// refresh. Shared by `start` and `refresh`.
+    fn collect_and_emit(&mut self) {
+        let ctx = self.ctx.clone().expect("init before start/refresh");
         let controls = apply_overrides(builtin_controls(), &self.policy.overrides);
 
         // Build the snapshot from the tables the controls need; a table the
@@ -71,14 +69,44 @@ impl Module for ComplianceModule {
             .collect();
         let records = to_records(&evaluate(&controls, &snap), &profiles);
         let data = serde_json::json!({ "compliance": { "records": records } });
-        ctx.emitter.emit(OcsfEnvelope::new(
-            class::COMPLIANCE_FINDING,
-            "Compliance Finding",
-            ctx.meta(),
-            ctx.snapshot.device(),
-            data,
-        ));
+        self.gate
+            .emit_if_changed(&ctx, class::COMPLIANCE_FINDING, "Compliance Finding", data);
+    }
+}
+
+impl Default for ComplianceModule {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl Module for ComplianceModule {
+    fn id(&self) -> ModuleId {
+        "compliance".to_string()
+    }
+
+    async fn init(&mut self, ctx: ModuleCtx) -> anyhow::Result<()> {
+        self.ctx = Some(ctx);
         Ok(())
+    }
+
+    async fn start(&mut self) -> anyhow::Result<()> {
+        self.collect_and_emit();
+        Ok(())
+    }
+
+    async fn refresh(&mut self) -> anyhow::Result<()> {
+        self.collect_and_emit();
+        Ok(())
+    }
+
+    fn refresh_interval(&self) -> Option<Duration> {
+        self.interval
+    }
+
+    fn set_refresh_interval(&mut self, interval: Option<Duration>) {
+        self.interval = interval;
     }
 
     fn health(&self) -> ModuleHealth {
@@ -97,6 +125,7 @@ mod tests {
         EventBus, EventKind, OcsfEmitter, ResourceBudget, ResourceGovernor, ResourceSampler,
         ResourceUsage, Rows, SnapshotProvider, SubstrateEvent,
     };
+    use torda_ocsf::OcsfEnvelope;
 
     struct FakeSnapshot;
     impl SnapshotProvider for FakeSnapshot {

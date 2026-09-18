@@ -77,6 +77,7 @@ fn write_enabled_config(dir: &Path) -> PathBuf {
             }],
             enabled: true,
         }),
+        refresh: Default::default(),
     };
 
     let cfg_path = dir.join("agent.toml");

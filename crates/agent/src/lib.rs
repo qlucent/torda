@@ -143,6 +143,13 @@ pub struct AgentConfig {
     /// control (today's `control_enabled = false`). Present + `enabled = true` → control runs.
     #[serde(default)]
     pub control: Option<ControlConfig>,
+    /// The `[refresh]` section (OPTIONAL): per-module periodic snapshot-refresh intervals in
+    /// SECONDS, keyed by module id (`fim`, `drift`, `asset`, `vuln`, `compliance`, `health`).
+    /// A value of `0` turns that module's refresh OFF (one-shot at startup, the pre-P0-3
+    /// behavior); an ABSENT id keeps the module's sensible built-in default. Only consulted in
+    /// daemon mode. Example: `[refresh]\nfim = 60\nasset = 0`.
+    #[serde(default)]
+    pub refresh: std::collections::HashMap<String, u64>,
 }
 
 /// The `[agent]` section: agent-wide run-mode settings.
@@ -585,6 +592,7 @@ mod config_tests {
                     crl_paths: vec![],
                 },
             }),
+            refresh: std::collections::HashMap::from([("fim".to_string(), 60u64)]),
         }
     }
 
@@ -626,6 +634,20 @@ mod config_tests {
             output.path,
             Some(PathBuf::from("/var/log/ua/events.ndjson"))
         );
+        assert!(cfg.refresh.is_empty(), "absent [refresh] -> empty map");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn refresh_section_parses_per_module_intervals_and_off() {
+        let dir = temp_dir("refresh-cfg");
+        let path = dir.join("agent.toml");
+        // fim every 60s, asset one-shot (0 = off); other modules keep their defaults.
+        std::fs::write(&path, "[refresh]\nfim = 60\nasset = 0\n").unwrap();
+        let cfg = load_config(&path).expect("[refresh] config loads");
+        assert_eq!(cfg.refresh.get("fim").copied(), Some(60));
+        assert_eq!(cfg.refresh.get("asset").copied(), Some(0));
+        assert_eq!(cfg.refresh.get("drift").copied(), None, "absent -> default");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

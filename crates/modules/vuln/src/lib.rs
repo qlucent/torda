@@ -4,8 +4,13 @@
 //! snapshot; it never touches the OS.
 
 use async_trait::async_trait;
-use torda_core::{Module, ModuleCtx, ModuleHealth, ModuleId};
-use torda_ocsf::{class, OcsfEnvelope};
+use std::time::Duration;
+use torda_core::{ChangeGate, Module, ModuleCtx, ModuleHealth, ModuleId};
+use torda_ocsf::class;
+
+/// Default SBOM refresh cadence in a daemon: hourly (installed packages change
+/// slowly). Config `[refresh] vuln = <secs>` overrides; `0` = off/one-shot.
+const DEFAULT_VULN_INTERVAL: Duration = Duration::from_secs(3600);
 
 /// Shapes package snapshot rows into an OCSF Software Inventory (SBOM) payload.
 /// Pure — the components pass through as-is (`{name, version, source}`); the
@@ -21,14 +26,41 @@ pub fn build_sbom_data(packages: &[serde_json::Value]) -> serde_json::Value {
 }
 
 /// Emits an OCSF Software Inventory (SBOM) record from the package snapshot.
-#[derive(Default)]
 pub struct VulnModule {
     ctx: Option<ModuleCtx>,
+    gate: ChangeGate,
+    interval: Option<Duration>,
+}
+
+impl Default for VulnModule {
+    fn default() -> Self {
+        Self {
+            ctx: None,
+            gate: ChangeGate::new(),
+            interval: Some(DEFAULT_VULN_INTERVAL),
+        }
+    }
 }
 
 impl VulnModule {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Read the current package set and emit the SBOM, gated so an unchanged
+    /// package set does not re-emit on a periodic refresh. Shared by `start` and
+    /// `refresh`.
+    fn collect_and_emit(&mut self) -> anyhow::Result<()> {
+        let ctx = self.ctx.clone().expect("init before start/refresh");
+        let packages = ctx.snapshot.query("packages")?;
+        let data = build_sbom_data(&packages.0);
+        self.gate.emit_if_changed(
+            &ctx,
+            class::SOFTWARE_INVENTORY_INFO,
+            "Software Inventory Info",
+            data,
+        );
+        Ok(())
     }
 }
 
@@ -44,17 +76,19 @@ impl Module for VulnModule {
     }
 
     async fn start(&mut self) -> anyhow::Result<()> {
-        let ctx = self.ctx.as_ref().expect("init before start");
-        let packages = ctx.snapshot.query("packages")?;
-        let data = build_sbom_data(&packages.0);
-        ctx.emitter.emit(OcsfEnvelope::new(
-            class::SOFTWARE_INVENTORY_INFO,
-            "Software Inventory Info",
-            ctx.meta(),
-            ctx.snapshot.device(),
-            data,
-        ));
-        Ok(())
+        self.collect_and_emit()
+    }
+
+    async fn refresh(&mut self) -> anyhow::Result<()> {
+        self.collect_and_emit()
+    }
+
+    fn refresh_interval(&self) -> Option<Duration> {
+        self.interval
+    }
+
+    fn set_refresh_interval(&mut self, interval: Option<Duration>) {
+        self.interval = interval;
     }
 
     fn health(&self) -> ModuleHealth {
@@ -73,6 +107,7 @@ mod tests {
         EventBus, EventKind, OcsfEmitter, ResourceBudget, ResourceGovernor, ResourceSampler,
         ResourceUsage, Rows, SnapshotProvider, SubstrateEvent,
     };
+    use torda_ocsf::OcsfEnvelope;
 
     #[test]
     fn build_sbom_data_wraps_components_with_count() {
