@@ -23,6 +23,10 @@ use torda_bench::score::{all_tier_a_hit, matrix_md, score};
 
 const ISOLATION_SENTINEL: &str = "/etc/torda-bench/ISOLATED";
 const PREFLIGHT_CASE: &str = "lolbin-basic";
+/// Seconds to let the event ring drain BEFORE each case's window opens (see
+/// `run_case`) — the eBPF backend timestamps records at drain time, so this keeps
+/// one case's late-drained tail out of the next case's window.
+const QUIET_DRAIN_SECS: u64 = 3;
 
 fn main() {
     if let Err(e) = run() {
@@ -164,6 +168,15 @@ fn run_case(case: &Case, sink: &str, root: &Path, isolate: bool) -> Result<CaseC
         .unwrap_or(5.0);
 
     run_script(&case.cleanup, root); // reverse prior state
+
+    // Quiet-drain gap BEFORE the window opens. The eBPF backend stamps each record
+    // with its DRAIN time, not the event time, so a prior case's tail (or this
+    // case's own cleanup: bash/rm/cp execs, watched-file rewrites) drained late
+    // would otherwise land inside this window as a false positive. Sleeping here
+    // lets the ring flush all of that with pre-trigger timestamps, so the window
+    // contains only the atomic's own activity.
+    std::thread::sleep(std::time::Duration::from_secs(QUIET_DRAIN_SECS));
+
     let trigger_time = capture::now_ms();
     run_script(&case.atomic, root);
 
