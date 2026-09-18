@@ -335,6 +335,13 @@ async fn main() -> anyhow::Result<()> {
     mgr.register(Box::new(torda_mod_corr::CorrModule::new()));
 
     mgr.init_all().await?;
+    // P0-3: apply per-module periodic-refresh intervals from the `[refresh]`
+    // config section (module id → seconds; 0 = off) BEFORE starting. Absent ids
+    // keep each module's sensible built-in default. Only takes effect in daemon
+    // mode (the scheduler runs below); a one-shot run still just emits at start.
+    if let Some(cfg) = config.as_ref() {
+        mgr.apply_refresh_overrides(&cfg.refresh);
+    }
     mgr.start_all().await?;
 
     if daemon_mode {
@@ -366,8 +373,16 @@ async fn main() -> anyhow::Result<()> {
 
         // Reuse the SAME shutdown wait as the control-only path: ctrl-c /
         // SIGINT, or the deterministic `$TORDA_RUN_SECS` bound — so a daemon run
-        // (with or without control) never hangs.
-        wait_for_shutdown().await;
+        // (with or without control) never hangs. Raced against the P0-3 snapshot
+        // scheduler, which re-runs each snapshot module's `refresh` on its
+        // interval (FIM/drift/asset/vuln/compliance/health) FOREVER — so a file
+        // changed after boot is now caught. `run_periodic` never returns on its
+        // own (it idles when nothing is scheduled), so only the shutdown arm ends
+        // the select; dropping the future then stops the scheduler cleanly.
+        tokio::select! {
+            _ = wait_for_shutdown() => {}
+            _ = mgr.run_periodic() => { unreachable!("run_periodic never returns on its own") }
+        }
         poller.abort();
         let _ = poller.await; // expected Cancelled error from abort() — not a failure
 

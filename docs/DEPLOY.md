@@ -134,12 +134,26 @@ exercise the other detection paths the same way.
 
 ## 5. Current (v1) limits — read this before you rely on it
 
-- **Snapshot modules emit once at startup, not periodically.** `asset`,
-  `health`, `vuln`, `compliance`, `drift`, and `fim` collect a point-in-time
-  snapshot when the daemon starts and do not re-collect while it keeps
-  running. Only the event-driven modules (`procmon`, `netmon`, `filemon`,
-  `corr`) stream continuously. Periodic snapshot refresh is a tracked
-  fast-follow.
+- **Snapshot modules refresh periodically in daemon mode.** `asset`, `health`,
+  `vuln`, `compliance`, `drift`, and `fim` collect at startup AND re-collect on
+  a per-module interval, emitting only when the result changed since the last
+  collection (so, e.g., FIM catches a watched file modified *after* boot, and
+  drift catches a config change). Event-driven modules (`procmon`, `netmon`,
+  `filemon`, `corr`) stream continuously as before. Intervals are configurable
+  in the `[refresh]` section of the TOML config — keys are module ids, values
+  are **seconds**, and `0` turns a module back to one-shot-at-startup:
+
+  ```toml
+  [refresh]
+  fim = 60        # re-check file integrity every minute
+  drift = 300     # config drift every 5 min (default)
+  asset = 3600    # inventory hourly (default)
+  vuln = 0        # off: SBOM only at startup
+  ```
+
+  Defaults when a key is omitted: `fim`/`drift` 5 min, `asset`/`vuln`/
+  `compliance` hourly, `health` 60 s. A one-shot (non-daemon) run is unchanged —
+  every module emits exactly once and exits.
 - **Config changes need a restart.** The TOML config (`--config`) is read once
   at startup — there is no hot-reload/SIGHUP yet, so restart the service to
   apply a change.

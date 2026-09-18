@@ -5,37 +5,46 @@
 //! never the OS.
 use async_trait::async_trait;
 use std::collections::HashSet;
+use std::time::Duration;
 use torda_compliance::control::Snapshot;
 use torda_compliance::drift::{builtin_baseline, detect_drift, to_drift_records};
-use torda_core::{Module, ModuleCtx, ModuleHealth, ModuleId};
-use torda_ocsf::{class, OcsfEnvelope};
+use torda_core::{ChangeGate, Module, ModuleCtx, ModuleHealth, ModuleId};
+use torda_ocsf::class;
+
+/// Default config-drift refresh cadence in a daemon: 5 minutes (drift, like FIM,
+/// is about detecting change after startup). Config `[refresh] drift = <secs>`
+/// overrides; `0` = off/one-shot.
+const DEFAULT_DRIFT_INTERVAL: Duration = Duration::from_secs(300);
 
 /// Evaluates the config baseline over the snapshot and emits one OCSF Device
-/// Config State record for the whole run.
-#[derive(Default)]
+/// Config State record — at startup and, in a daemon, on each refresh when the
+/// detected drift set CHANGED (gated so an unchanged baseline does not re-emit).
 pub struct DriftModule {
     ctx: Option<ModuleCtx>,
+    gate: ChangeGate,
+    interval: Option<Duration>,
+}
+
+impl Default for DriftModule {
+    fn default() -> Self {
+        Self {
+            ctx: None,
+            gate: ChangeGate::new(),
+            interval: Some(DEFAULT_DRIFT_INTERVAL),
+        }
+    }
 }
 
 impl DriftModule {
     pub fn new() -> Self {
         Self::default()
     }
-}
 
-#[async_trait]
-impl Module for DriftModule {
-    fn id(&self) -> ModuleId {
-        "drift".to_string()
-    }
-
-    async fn init(&mut self, ctx: ModuleCtx) -> anyhow::Result<()> {
-        self.ctx = Some(ctx);
-        Ok(())
-    }
-
-    async fn start(&mut self) -> anyhow::Result<()> {
-        let ctx = self.ctx.as_ref().expect("init before start");
+    /// Evaluate the baseline over the current snapshot and emit the drift set,
+    /// gated so an unchanged baseline does not re-emit on a periodic refresh.
+    /// Shared by `start` and `refresh`.
+    fn collect_and_emit(&mut self) {
+        let ctx = self.ctx.clone().expect("init before start/refresh");
         let baseline = builtin_baseline();
 
         // Build the snapshot from the tables the baseline needs; a table the
@@ -52,14 +61,42 @@ impl Module for DriftModule {
 
         let records = to_drift_records(&detect_drift(&baseline, &snap));
         let data = serde_json::json!({ "drift": { "records": records } });
-        ctx.emitter.emit(OcsfEnvelope::new(
+        self.gate.emit_if_changed(
+            &ctx,
             class::DEVICE_CONFIG_STATE,
             "Device Config State",
-            ctx.meta(),
-            ctx.snapshot.device(),
             data,
-        ));
+        );
+    }
+}
+
+#[async_trait]
+impl Module for DriftModule {
+    fn id(&self) -> ModuleId {
+        "drift".to_string()
+    }
+
+    async fn init(&mut self, ctx: ModuleCtx) -> anyhow::Result<()> {
+        self.ctx = Some(ctx);
         Ok(())
+    }
+
+    async fn start(&mut self) -> anyhow::Result<()> {
+        self.collect_and_emit();
+        Ok(())
+    }
+
+    async fn refresh(&mut self) -> anyhow::Result<()> {
+        self.collect_and_emit();
+        Ok(())
+    }
+
+    fn refresh_interval(&self) -> Option<Duration> {
+        self.interval
+    }
+
+    fn set_refresh_interval(&mut self, interval: Option<Duration>) {
+        self.interval = interval;
     }
 
     fn health(&self) -> ModuleHealth {
@@ -78,6 +115,7 @@ mod tests {
         EventBus, EventKind, OcsfEmitter, ResourceBudget, ResourceGovernor, ResourceSampler,
         ResourceUsage, Rows, SnapshotProvider, SubstrateEvent,
     };
+    use torda_ocsf::OcsfEnvelope;
 
     struct FakeSnapshot;
     impl SnapshotProvider for FakeSnapshot {

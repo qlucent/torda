@@ -1,12 +1,22 @@
 //! Agent self-health module. Emits a heartbeat OCSF record.
 use async_trait::async_trait;
-use std::time::Instant;
-use torda_core::{Module, ModuleCtx, ModuleHealth, ModuleId, ResourceBudget, ResourceUsage};
-use torda_ocsf::{class, OcsfEnvelope};
+use std::time::{Duration, Instant};
+use torda_core::{
+    ChangeGate, Module, ModuleCtx, ModuleHealth, ModuleId, ResourceBudget, ResourceUsage,
+};
+use torda_ocsf::class;
+
+/// Default health-heartbeat cadence in a daemon: 60s. Unlike the other snapshot
+/// modules this is a LIVENESS beat — its payload (uptime/resource usage) changes
+/// every tick, so it re-emits each interval by design. Config `[refresh] health =
+/// <secs>` overrides; `0` = off (a single startup heartbeat).
+const DEFAULT_HEALTH_INTERVAL: Duration = Duration::from_secs(60);
 
 pub struct HealthModule {
     ctx: Option<ModuleCtx>,
     started: Instant,
+    gate: ChangeGate,
+    interval: Option<Duration>,
 }
 
 impl HealthModule {
@@ -14,7 +24,24 @@ impl HealthModule {
         Self {
             ctx: None,
             started: Instant::now(),
+            gate: ChangeGate::new(),
+            interval: Some(DEFAULT_HEALTH_INTERVAL),
         }
+    }
+
+    /// Emit a heartbeat with current uptime + resource usage. Gated for API
+    /// uniformity, though the changing uptime means it emits every refresh (a
+    /// liveness beat, by design). Shared by `start` and `refresh`.
+    fn collect_and_emit(&mut self) {
+        let ctx = self.ctx.clone().expect("init before start/refresh");
+        let usage = ctx.governor.last_usage();
+        let data = serde_json::json!({
+            "status": "ok",
+            "uptime_ms": self.started.elapsed().as_millis() as u64,
+            "resource": resource_data(&usage, ctx.governor.budget()),
+        });
+        self.gate
+            .emit_if_changed(&ctx, class::AGENT_HEALTH, "Agent Health", data);
     }
 }
 
@@ -37,21 +64,21 @@ impl Module for HealthModule {
     }
 
     async fn start(&mut self) -> anyhow::Result<()> {
-        let ctx = self.ctx.as_ref().expect("init before start");
-        let usage = ctx.governor.last_usage();
-        let data = serde_json::json!({
-            "status": "ok",
-            "uptime_ms": self.started.elapsed().as_millis() as u64,
-            "resource": resource_data(&usage, ctx.governor.budget()),
-        });
-        ctx.emitter.emit(OcsfEnvelope::new(
-            class::AGENT_HEALTH,
-            "Agent Health",
-            ctx.meta(),
-            ctx.snapshot.device(),
-            data,
-        ));
+        self.collect_and_emit();
         Ok(())
+    }
+
+    async fn refresh(&mut self) -> anyhow::Result<()> {
+        self.collect_and_emit();
+        Ok(())
+    }
+
+    fn refresh_interval(&self) -> Option<Duration> {
+        self.interval
+    }
+
+    fn set_refresh_interval(&mut self, interval: Option<Duration>) {
+        self.interval = interval;
     }
 
     fn health(&self) -> ModuleHealth {
