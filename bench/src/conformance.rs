@@ -101,7 +101,7 @@ pub fn validate_records(records: &[Value]) -> Conformance {
     let total: usize = total_by.values().sum();
     let passed: usize = pass_by.values().sum();
     let mut top: Vec<(String, usize)> = violations.into_iter().collect();
-    top.sort_by(|a, b| b.1.cmp(&a.1));
+    top.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
     top.truncate(10);
 
     Conformance {
