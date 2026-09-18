@@ -38,6 +38,17 @@
 //! inheritance needs the PARENT's exec to have been seen and still retained (live
 //! map or the recently-exited window); a parent evicted or long-exited is not
 //! reconstructed.
+//!
+//! # Instance-aware attribution
+//! Attribution is by pid, but a pid is REUSED (or exec-replaced) over time. Each
+//! `NetConnect`/`FileWrite`/`FileOpen` event carries the kernel `comm` stamped AT
+//! SYSCALL TIME; before attributing, corr cross-checks it against the retained
+//! exec context's image (`resolve_instance`). On a mismatch the pid holds a
+//! DIFFERENT process instance than the one that made the syscall (a drain-lagged
+//! event landing after a reuse), so corr re-assesses the event's own comm and
+//! attributes by THAT — never mis-crediting a reused pid's stale context. (A
+//! kernel-stamped process start-time would be a stronger instance key; the comm
+//! cross-check needs no CO-RE and closes the demonstrated case.)
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -1742,11 +1753,49 @@ fn handle_exit(
     tracked_len.store(map.len(), Ordering::Relaxed);
 }
 
-/// The JOIN. If the pid is already known, emits ONE correlated record
-/// immediately (the unchanged attributed path). If NOT — the exec may simply not
-/// have been drained yet — the connect is BUFFERED for [`GRACE`] so its exec can
-/// still correlate it (order-independent). Missing/unparseable pid/daddr/dport →
-/// skipped (no panic, no emit, no buffer).
+/// Whether the kernel `comm` an EVENT was stamped with (at syscall time) belongs
+/// to the SAME process instance as a retained exec context. The comm is the
+/// exec'd binary's basename, TRUNCATED to `TASK_COMM_LEN-1` (15) bytes, so it must
+/// be a prefix of the context image's basename. An empty/`"unknown"` comm carries
+/// no signal — treat it as a match so a comm-less event still trusts the context.
+fn same_instance(ctx_image: &str, event_comm: &str) -> bool {
+    if event_comm.is_empty() || event_comm == "unknown" {
+        return true;
+    }
+    let base = ctx_image.rsplit('/').next().unwrap_or(ctx_image);
+    base.as_bytes().starts_with(event_comm.as_bytes())
+}
+
+/// INSTANCE-AWARE ATTRIBUTION: resolve the process identity to attribute an event
+/// to. If the event's own connect/write-time `comm` matches the retained exec
+/// context, use the (richer) context. If it does NOT, the pid was REUSED or
+/// exec-replaced between the exec and this drain-lagged event — trusting the stale
+/// context would mis-attribute to a DIFFERENT process instance (the classic
+/// `/tmp/nc`→`sleep` case). Re-assess the event's OWN comm with procmon and
+/// attribute by THAT — the process that actually made the syscall — keeping
+/// correlation instance-correct without a kernel-stamped start-time.
+fn resolve_instance(ctx: &ProcContext, event_comm: &str) -> (String, u8, Vec<serde_json::Value>) {
+    if same_instance(&ctx.image, event_comm) {
+        return (
+            ctx.image.clone(),
+            ctx.exec_severity,
+            ctx.exec_detections.clone(),
+        );
+    }
+    let a = torda_mod_procmon::assess(event_comm);
+    let detections = a
+        .hits
+        .iter()
+        .map(|h| serde_json::json!({ "rule": h.rule, "reason": h.reason }))
+        .collect();
+    (event_comm.to_string(), a.severity_id, detections)
+}
+
+/// The JOIN. If the pid is already known, emits ONE correlated record immediately
+/// (the attributed path, instance-checked against the connect-time comm). If NOT —
+/// the exec may simply not have been drained yet — the connect is BUFFERED for
+/// [`GRACE`] so its exec can still correlate it (order-independent).
+/// Missing/unparseable pid/daddr/dport → skipped (no panic, no emit, no buffer).
 #[allow(clippy::too_many_arguments)]
 fn handle_connect(
     ev: &SubstrateEvent,
@@ -1794,20 +1843,11 @@ fn handle_connect(
 
     let key = pid as u32;
     match map.get(&key) {
-        // pid found → emit the correlated record IMMEDIATELY (unchanged path).
+        // pid found → attribute (instance-checked against the connect-time comm).
         Some(c) => {
+            let (img, sev, dets) = resolve_instance(c, connect_image);
             if let Some(conn_detections) = emit_correlated(
-                meta,
-                device,
-                emitter,
-                pid,
-                true,
-                &c.image,
-                c.exec_severity,
-                &c.exec_detections,
-                daddr,
-                dport,
-                proto,
+                meta, device, emitter, pid, true, &img, sev, &dets, daddr, dport, proto,
             ) {
                 record_connect_and_maybe_chain(
                     chain,
@@ -1815,8 +1855,8 @@ fn handle_connect(
                     device,
                     emitter,
                     pid,
-                    &c.image,
-                    &c.exec_detections,
+                    &img,
+                    &dets,
                     daddr,
                     dport,
                     proto,
@@ -1837,18 +1877,9 @@ fn handle_connect(
             .is_some_and(|(_, stamp)| stamp.elapsed() < EXITED_RETENTION) =>
         {
             let (c, _) = &recently_exited[&key];
+            let (img, sev, dets) = resolve_instance(c, connect_image);
             if let Some(conn_detections) = emit_correlated(
-                meta,
-                device,
-                emitter,
-                pid,
-                true,
-                &c.image,
-                c.exec_severity,
-                &c.exec_detections,
-                daddr,
-                dport,
-                proto,
+                meta, device, emitter, pid, true, &img, sev, &dets, daddr, dport, proto,
             ) {
                 record_connect_and_maybe_chain(
                     chain,
@@ -1856,8 +1887,8 @@ fn handle_connect(
                     device,
                     emitter,
                     pid,
-                    &c.image,
-                    &c.exec_detections,
+                    &img,
+                    &dets,
                     daddr,
                     dport,
                     proto,
@@ -1939,27 +1970,20 @@ fn handle_file_write(
 
     let key = pid as u32;
     match map.get(&key) {
-        // pid found → emit the correlated record IMMEDIATELY (attributed).
+        // pid found → attribute (instance-checked against the write-time comm).
         Some(c) => {
-            if let Some(file_detections) = emit_correlated_file(
-                meta,
-                device,
-                emitter,
-                pid,
-                true,
-                &c.image,
-                c.exec_severity,
-                &c.exec_detections,
-                path,
-            ) {
+            let (img, sev, dets) = resolve_instance(c, write_image);
+            if let Some(file_detections) =
+                emit_correlated_file(meta, device, emitter, pid, true, &img, sev, &dets, path)
+            {
                 record_file_and_maybe_chain(
                     chain,
                     meta,
                     device,
                     emitter,
                     pid,
-                    &c.image,
-                    &c.exec_detections,
+                    &img,
+                    &dets,
                     path,
                     file_detections,
                     chain_len,
@@ -1979,25 +2003,18 @@ fn handle_file_write(
             .is_some_and(|(_, stamp)| stamp.elapsed() < EXITED_RETENTION) =>
         {
             let (c, _) = &recently_exited[&key];
-            if let Some(file_detections) = emit_correlated_file(
-                meta,
-                device,
-                emitter,
-                pid,
-                true,
-                &c.image,
-                c.exec_severity,
-                &c.exec_detections,
-                path,
-            ) {
+            let (img, sev, dets) = resolve_instance(c, write_image);
+            if let Some(file_detections) =
+                emit_correlated_file(meta, device, emitter, pid, true, &img, sev, &dets, path)
+            {
                 record_file_and_maybe_chain(
                     chain,
                     meta,
                     device,
                     emitter,
                     pid,
-                    &c.image,
-                    &c.exec_detections,
+                    &img,
+                    &dets,
                     path,
                     file_detections,
                     chain_len,
@@ -2072,19 +2089,26 @@ fn handle_file_open(
         Some(d) => d,
         None => return,
     };
+    // The read-time comm (kernel-stamped) for the instance cross-check.
+    let read_image = ev
+        .fields
+        .get("image")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown");
 
     let key = pid as u32;
     match map.get(&key) {
-        // pid found LIVE → record the read half IMMEDIATELY (attributed).
+        // pid found LIVE → record the read half (instance-checked vs read-time comm).
         Some(c) => {
+            let (img, _sev, dets) = resolve_instance(c, read_image);
             record_read_and_maybe_exfil(
                 chain,
                 meta,
                 device,
                 emitter,
                 pid,
-                &c.image,
-                &c.exec_detections,
+                &img,
+                &dets,
                 path,
                 read_detections,
                 chain_len,
@@ -2102,14 +2126,15 @@ fn handle_file_open(
             .is_some_and(|(_, stamp)| stamp.elapsed() < EXITED_RETENTION) =>
         {
             let (c, _) = &recently_exited[&key];
+            let (img, _sev, dets) = resolve_instance(c, read_image);
             record_read_and_maybe_exfil(
                 chain,
                 meta,
                 device,
                 emitter,
                 pid,
-                &c.image,
-                &c.exec_detections,
+                &img,
+                &dets,
                 path,
                 read_detections,
                 chain_len,
@@ -3610,6 +3635,66 @@ mod tests {
         assert_ne!(r.data["process"]["image"], "/tmp/nc");
         assert_eq!(r.severity_id, SEV_HIGH);
         assert!(rule_names(&r.data["detections"]).contains(&CORRELATED_FILE_RULE.to_string()));
+    }
+
+    // ---------- R5. instance-aware: a STALE context is corrected by the event comm ----------
+
+    /// The exec-replace / reused-pid case the benchmark surfaced: pid 7's live map
+    /// context is a BENIGN process (`/usr/bin/sleep`) — as if a suspicious `/tmp/nc`
+    /// exec-replaced itself with `sleep` in the same pid — but the drain-lagged
+    /// connect was made by `/tmp/nc` and the kernel stamped its comm ("nc") at
+    /// syscall time. Instance-aware attribution notices comm != context image,
+    /// re-assesses "nc" (a lolbin), and correlates by the process that ACTUALLY
+    /// connected. Without it the connect would attribute to benign `sleep` and no
+    /// correlated rule would fire.
+    #[tokio::test]
+    async fn instance_aware_stale_context_corrected_by_connect_comm() {
+        let emitter = Arc::new(CapturingEmitter::default());
+        let bus = StubBus::new();
+        let mut m = CorrModule::new();
+        m.init(make_ctx(bus.clone(), emitter.clone()))
+            .await
+            .unwrap();
+        m.start().await.unwrap();
+
+        // pid 7's map context is benign sleep (no exit — a stale exec-replace).
+        bus.publish(exec_event(
+            1,
+            serde_json::json!({ "pid": 7, "image": "/usr/bin/sleep" }),
+        ));
+        wait_tracked(&m, 1).await;
+        // The lagged connect carries the REAL connect-time comm "nc" (a lolbin).
+        bus.publish(net_event(
+            2,
+            serde_json::json!({ "pid": 7, "image": "nc", "daddr": "203.0.113.1", "dport": 4444 }),
+        ));
+
+        wait_until(&emitter, 1).await;
+        m.stop().await.unwrap();
+
+        let emitted = emitter.emitted.lock().unwrap();
+        assert_eq!(emitted.len(), 1);
+        let r = &emitted[0];
+        // Correlated High, attributed to the process that ACTUALLY connected (nc),
+        // NOT the benign sleep the stale map held.
+        assert_eq!(r.severity_id, SEV_HIGH);
+        assert!(rule_names(&r.data["detections"]).contains(&CORRELATED_RULE.to_string()));
+        assert_eq!(r.data["process"]["image"], "nc");
+        assert!(rule_names(&r.data["process"]["detections"]).contains(&"lolbin".to_string()));
+    }
+
+    /// Unit: comm/instance matching survives comm truncation and rejects a
+    /// different process; an absent/`unknown` comm is treated as a match (no signal).
+    #[test]
+    fn same_instance_matches_basename_prefix() {
+        assert!(same_instance("/tmp/nc", "nc")); // exact basename
+        assert!(same_instance(
+            "/usr/bin/verylongprocessname",
+            "verylongprocess"
+        )); // 15-char comm truncation
+        assert!(!same_instance("/usr/bin/sleep", "nc")); // different process
+        assert!(same_instance("/usr/bin/sleep", "")); // no comm → trust context
+        assert!(same_instance("/usr/bin/sleep", "unknown")); // sentinel → trust context
     }
 
     // ==================== TRIPLE CHAIN (write + connect) ====================
