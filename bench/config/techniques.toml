@@ -1,0 +1,229 @@
+# Torda benchmark — the ATT&CK test registry (the heart of the harness).
+#
+# Each [[case]] is ONE atomic test. Ground truth is DECLARED here, never inferred:
+# `expects` says which OCSF class + torda rule SHOULD fire within `within_seconds`.
+# Scoring compares captured OCSF against this — never a tool's own opinion.
+#
+# tier "A" = detections torda claims today (validate the tool; produce coverage %).
+# tier "B" = techniques peer tools catch that torda historically didn't (the honest
+#            gap). expected_result "miss"; a hit is scored GAP_CLOSED.
+#
+# Rule names are the REAL torda identifiers (verified against
+# crates/modules/{procmon,netmon,filemon,corr}); keep them in sync with the code.
+
+# ─────────────────────────── Tier A — should fire today ───────────────────────────
+
+[[case]]
+id = "lolbin-basic"
+attack_technique = "T1059"
+attack_tactic = "execution"
+name = "Living-off-the-land binary executed"
+platform = "linux"
+tier = "A"
+atomic = "atomics/linux/lolbin_basic.sh"
+cleanup = "atomics/linux/noop_cleanup.sh"
+expects = { ocsf_class = 1007, rule = "lolbin", within_seconds = 5 }
+expected_result = "hit"
+notes = "procmon LOLBINS family (base64/xxd/nc/...)."
+
+[[case]]
+id = "lolbin-susp-path"
+attack_technique = "T1059.004"
+attack_tactic = "execution"
+name = "LOLBin executed from a suspicious path (/tmp)"
+platform = "linux"
+tier = "A"
+atomic = "atomics/linux/lolbin_susp_path.sh"
+cleanup = "atomics/linux/rm_tmp_payload.sh"
+expects = { ocsf_class = 1007, rule = "lolbin_in_suspicious_path", within_seconds = 5 }
+expected_result = "hit"
+notes = "Copy a lolbin into /tmp and run it — the combined HIGH signal."
+
+[[case]]
+id = "susp-path-exec"
+attack_technique = "T1036.005"
+attack_tactic = "defense-evasion"
+name = "Non-lolbin executed from a suspicious path"
+platform = "linux"
+tier = "A"
+atomic = "atomics/linux/susp_path_exec.sh"
+cleanup = "atomics/linux/rm_tmp_payload.sh"
+expects = { ocsf_class = 1007, rule = "suspicious_path", within_seconds = 5 }
+expected_result = "hit"
+
+[[case]]
+id = "c2-port-connect"
+attack_technique = "T1571"
+attack_tactic = "command-and-control"
+name = "Connect to a known-suspicious C2 port"
+platform = "linux"
+tier = "A"
+atomic = "atomics/linux/c2_port_connect.sh"
+cleanup = "atomics/linux/noop_cleanup.sh"
+expects = { ocsf_class = 4001, rule = "suspicious_port", within_seconds = 5 }
+expected_result = "hit"
+notes = "TCP connect to the local sinkhole on a suspicious port (never the internet)."
+
+[[case]]
+id = "c2-external-beacon"
+attack_technique = "T1071"
+attack_tactic = "command-and-control"
+name = "Beacon to an external host on a suspicious port"
+platform = "linux"
+tier = "A"
+atomic = "atomics/linux/c2_external_beacon.sh"
+cleanup = "atomics/linux/noop_cleanup.sh"
+expects = { ocsf_class = 4001, rule = "suspicious_port_to_external", within_seconds = 5 }
+expected_result = "hit"
+
+[[case]]
+id = "write-system-dir"
+attack_technique = "T1543"
+attack_tactic = "persistence"
+name = "Write into a system directory"
+platform = "linux"
+tier = "A"
+atomic = "atomics/linux/write_system_dir.sh"
+cleanup = "atomics/linux/rm_system_dir_write.sh"
+expects = { ocsf_class = 1001, rule = "write_to_system_dir", within_seconds = 5 }
+expected_result = "hit"
+
+[[case]]
+id = "write-persistence"
+attack_technique = "T1547"
+attack_tactic = "persistence"
+name = "Write to a persistence location"
+platform = "linux"
+tier = "A"
+atomic = "atomics/linux/write_persistence.sh"
+cleanup = "atomics/linux/rm_persistence_write.sh"
+expects = { ocsf_class = 1001, rule = "write_to_persistence_location", within_seconds = 5 }
+expected_result = "hit"
+
+[[case]]
+id = "write-sensitive-cfg"
+attack_technique = "T1556"
+attack_tactic = "credential-access"
+name = "Write to a sensitive config file"
+platform = "linux"
+tier = "A"
+atomic = "atomics/linux/write_sensitive_cfg.sh"
+cleanup = "atomics/linux/rm_sensitive_cfg_write.sh"
+expects = { ocsf_class = 1001, rule = "write_to_sensitive_config", within_seconds = 5 }
+expected_result = "hit"
+
+[[case]]
+id = "read-secret"
+attack_technique = "T1552.001"
+attack_tactic = "credential-access"
+name = "Read a sensitive/secret file"
+platform = "linux"
+tier = "A"
+atomic = "atomics/linux/read_secret.sh"
+cleanup = "atomics/linux/noop_cleanup.sh"
+expects = { ocsf_class = 1001, rule = "read_of_sensitive_file", within_seconds = 5 }
+expected_result = "hit"
+
+[[case]]
+id = "chain-dropper-c2"
+attack_technique = "T1105+T1571"
+attack_tactic = "command-and-control"
+name = "Dropper writes a payload then beacons (triple chain)"
+platform = "linux"
+tier = "A"
+atomic = "atomics/linux/chain_dropper_c2.sh"
+cleanup = "atomics/linux/rm_tmp_payload.sh"
+expects = { ocsf_class = 9002, rule = "suspicious_process_wrote_file_and_connected", within_seconds = 8 }
+expected_result = "hit"
+notes = "Cross-sensor correlation (file+network, same pid)."
+
+[[case]]
+id = "chain-exfil-beacon"
+attack_technique = "T1552+T1041"
+attack_tactic = "exfiltration"
+name = "Process reads a secret then beacons (exfil chain)"
+platform = "linux"
+tier = "A"
+atomic = "atomics/linux/chain_exfil_beacon.sh"
+cleanup = "atomics/linux/noop_cleanup.sh"
+expects = { ocsf_class = 9002, rule = "suspicious_process_read_sensitive_and_connected", within_seconds = 8 }
+expected_result = "hit"
+
+# ─────────────────────── Tier B — the honest coverage gap ───────────────────────
+# expected_result "miss". A hit is GAP_CLOSED. P0-1 ancestry correlation shipped, so
+# ancestry-chain may now HIT — the harness reports the improvement, doesn't hide it.
+
+[[case]]
+id = "proc-injection"
+attack_technique = "T1055"
+attack_tactic = "defense-evasion"
+name = "Process injection into another process"
+platform = "linux"
+tier = "B"
+atomic = "atomics/linux/proc_injection.sh"
+cleanup = "atomics/linux/noop_cleanup.sh"
+expected_result = "miss"
+notes = "No memory/injection sensor — peer tools use injection analytics."
+
+[[case]]
+id = "cred-dump-mem"
+attack_technique = "T1003.007"
+attack_tactic = "credential-access"
+name = "Credential dump via /proc scraping"
+platform = "linux"
+tier = "B"
+atomic = "atomics/linux/cred_dump_mem.sh"
+cleanup = "atomics/linux/noop_cleanup.sh"
+expected_result = "miss"
+notes = "Reading /proc/<pid>/mem — not covered."
+
+[[case]]
+id = "ancestry-chain"
+attack_technique = "T1059+T1105"
+attack_tactic = "execution"
+name = "Suspicious parent forks a benign child that acts"
+platform = "linux"
+tier = "B"
+atomic = "atomics/linux/ancestry_chain.sh"
+cleanup = "atomics/linux/rm_tmp_payload.sh"
+expects = { ocsf_class = 9002, rule = "suspicious_ancestor", within_seconds = 8 }
+expected_result = "miss"
+notes = "Historically pid-join-only miss. P0-1 shipped ancestry inheritance → may now HIT (gap-closed)."
+
+[[case]]
+id = "reparented-chain"
+attack_technique = "T1055.009"
+attack_tactic = "defense-evasion"
+name = "Reparented process continues the chain"
+platform = "linux"
+tier = "B"
+atomic = "atomics/linux/reparented_chain.sh"
+cleanup = "atomics/linux/rm_tmp_payload.sh"
+expects = { ocsf_class = 9002, rule = "suspicious_ancestor", within_seconds = 8 }
+expected_result = "miss"
+notes = "Reparenting (double-fork). P0-1 recently-exited window may partially close."
+
+[[case]]
+id = "scheduled-task"
+attack_technique = "T1053.003"
+attack_tactic = "persistence"
+name = "Cron/at persistence added after boot"
+platform = "linux"
+tier = "B"
+atomic = "atomics/linux/scheduled_task.sh"
+cleanup = "atomics/linux/rm_cron_entry.sh"
+expects = { ocsf_class = 1001, rule = "write_to_persistence_location", within_seconds = 300 }
+expected_result = "miss"
+notes = "Snapshot-once blind spot historically; P0-3 periodic refresh may now catch it."
+
+[[case]]
+id = "defense-evade-kill"
+attack_technique = "T1562.001"
+attack_tactic = "defense-evasion"
+name = "Attempt to kill/disable the agent"
+platform = "linux"
+tier = "B"
+atomic = "atomics/linux/defense_evade_kill.sh"
+cleanup = "atomics/linux/noop_cleanup.sh"
+expected_result = "miss"
+notes = "No tamper resistance / self-protection yet."

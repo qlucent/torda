@@ -1,0 +1,4 @@
+# Run artifacts are written under results/<run_id>/; keep them out of git.
+results/
+!results/.gitkeep
+.env

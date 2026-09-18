@@ -28,6 +28,7 @@ members = [
   "server/control-server",
   "server/transport",
   "server/transport-tls",
+  "bench",
 ]
 # The Linux kernel-side eBPF crates are EXCLUDED, not members: they only build
 # for `bpfel-unknown-none` under a nightly + bpf-linker toolchain (in WSL), so the
