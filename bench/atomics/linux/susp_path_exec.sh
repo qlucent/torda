@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# T1036.005 — a NON-lolbin executed from a suspicious path. Copy a benign binary
-# into /tmp and run it → `suspicious_path` (OCSF 1007), without the lolbin family.
+# T1036.005 — a NON-lolbin executed from a suspicious path → `suspicious_path`
+# (OCSF 1007), without the lolbin family. Uses `sleep` (not a lolbin) copied to
+# /tmp and kept alive ~2s so /proc enrichment resolves the /tmp path.
 set -eu
-cp -f "$(command -v true)" /tmp/xtrue
-chmod +x /tmp/xtrue
-/tmp/xtrue || true
+cp -f "$(command -v sleep)" /tmp/xsleep
+chmod +x /tmp/xsleep
+/tmp/xsleep 2 || true
