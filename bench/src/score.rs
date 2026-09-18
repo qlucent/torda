@@ -112,11 +112,16 @@ fn score_case(
         })
         .collect();
 
-    // False positives: an in-window record whose rule maps to a DIFFERENT technique.
+    // False positives: an in-window record whose rule maps to a technique NOT
+    // part of this case. A chain case declares a compound technique (e.g.
+    // "T1105+T1571"), and its component rules (the write AND the connect) are
+    // expected, not FPs — so compare against the SPLIT component set, not the
+    // exact string.
+    let components: Vec<&str> = case.attack_technique.split('+').collect();
     for r in &windowed {
         for rule in record_rules(r) {
             if let Some(tech) = rule2tech.get(&rule) {
-                if *tech != case.attack_technique && !result.fp_rules.contains(&rule) {
+                if !components.contains(&tech.as_str()) && !result.fp_rules.contains(&rule) {
                     result.fp_rules.push(rule);
                 }
             }
