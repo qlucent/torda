@@ -111,10 +111,24 @@ const GRACE: Duration = Duration::from_millis(250);
 /// `ProcessExit` has already evicted the live context — the write then misses
 /// the live `map` and the pre-exec pending buffer cannot rescue it (the exec
 /// already came and went). Retaining the exited context for this window closes
-/// that gap. Chosen generous enough to cover FILE-ring delivery lag under load,
-/// yet FAR below the Linux pid-recycle time, so a reused pid can never
-/// mis-attribute the previous process's context within the window.
-const EXITED_RETENTION: Duration = Duration::from_secs(1);
+/// that gap.
+///
+/// PINNED TO [`CHAIN_WINDOW`]: a chain half can arrive up to `CHAIN_WINDOW` after
+/// its partner (a dropper writes, then beacons seconds later), and a short-lived
+/// dropper's process context must survive at least that long or the late half
+/// finds no context, cannot fire its component, and cannot complete the triple —
+/// even though the chain window is still open. A retention SHORTER than
+/// `CHAIN_WINDOW` (it was 1s) silently dropped exactly these short-lived-process
+/// chains under FILE-ring lag; equal is the minimum that keeps the two windows
+/// consistent (retaining LONGER would only cost memory — a chain can no longer
+/// form past `CHAIN_WINDOW` anyway).
+///
+/// Still pid-reuse-safe despite the longer window: a fresh `ProcessExec` for a
+/// reused pid REMOVES its `recently_exited` entry (see `handle_exec`) before any
+/// later event could consult it, and `CHAIN_WINDOW` (5s) stays far below the
+/// Linux pid-recycle time on a default `pid_max`, so the previous process's
+/// context cannot mis-attribute to a reused pid.
+const EXITED_RETENTION: Duration = CHAIN_WINDOW;
 
 /// Largest number of recently-exited contexts retained. Bounds memory on a host
 /// with high exit churn exactly as [`MAX_TRACKED`] bounds the live map: at the
@@ -3485,6 +3499,66 @@ mod tests {
         assert_eq!(r.data["process"]["image"], "nc");
         assert!(!rule_names(&r.data["detections"]).contains(&CORRELATED_FILE_RULE.to_string()));
         assert_eq!(r.data["file"]["path"], "/etc/passwd");
+    }
+
+    // ---------- R3b. short-lived dropper: the TRIPLE survives a late FILE half ----------
+
+    /// The short-lived-process hardening: a suspicious dropper connects, then
+    /// EXITS, and its file-write is drained LATE off the high-volume FILE ring —
+    /// PAST the old 1s retention but WITHIN `CHAIN_WINDOW` of the connect. The
+    /// process context must still be retained (so the write attributes) AND the
+    /// triple must still fire. This FAILED when `EXITED_RETENTION` (1s) was shorter
+    /// than `CHAIN_WINDOW` (5s): the context was evicted while the chain window was
+    /// still open, so the late half found no context and the triple was silently
+    /// lost. Pinning `EXITED_RETENTION = CHAIN_WINDOW` closes it.
+    #[tokio::test]
+    async fn triple_chain_survives_file_half_lagged_past_old_retention() {
+        let emitter = Arc::new(CapturingEmitter::default());
+        let bus = StubBus::new();
+        let mut m = CorrModule::new();
+        m.init(make_ctx(bus.clone(), emitter.clone()))
+            .await
+            .unwrap();
+        m.start().await.unwrap();
+
+        // Suspicious dropper execs and BEACONS (records the connect chain half),
+        // then exits — its context moves to recently_exited.
+        bus.publish(exec_event(
+            1,
+            serde_json::json!({ "pid": 7, "image": "/tmp/nc" }),
+        ));
+        bus.publish(net_event(
+            2,
+            serde_json::json!({ "pid": 7, "image": "nc", "daddr": "203.0.113.1", "dport": 4444 }),
+        ));
+        wait_until(&emitter, 1).await; // connect pair emitted → connect half recorded
+        bus.publish(exit_event(3, serde_json::json!({ "pid": 7 })));
+        wait_tracked(&m, 0).await; // exit processed → context in recently_exited
+
+        // FILE-ring lag: the dropper's write is processed ~1.5s later — comfortably
+        // past the OLD 1s retention, well within the 5s chain window.
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        bus.publish(file_write_event(
+            4,
+            serde_json::json!({ "pid": 7, "image": "nc", "path": "/etc/cron.d/evil" }),
+        ));
+
+        // The late write attributes (file pair) AND completes the triple: connect
+        // pair + file pair + triple = 3 records.
+        wait_until(&emitter, 3).await;
+        m.stop().await.unwrap();
+
+        let emitted = emitter.emitted.lock().unwrap();
+        let triple = emitted.iter().find(|r| {
+            rule_names(&r.data["detections"]).contains(&CORRELATED_CHAIN_RULE.to_string())
+        });
+        let triple = triple.expect("the triple must fire despite the lagged file half");
+        assert_eq!(triple.class_uid, class::CORRELATED_ACTIVITY);
+        assert_eq!(triple.severity_id, SEV_HIGH);
+        assert_eq!(triple.data["process"]["pid"], 7);
+        assert_eq!(triple.data["process"]["image"], "/tmp/nc"); // exited context, not un-attributed
+        assert_eq!(triple.data["file"]["path"], "/etc/cron.d/evil");
+        assert_eq!(triple.data["connection"]["dport"], 4444);
     }
 
     // ---------- R4. pid reuse: a reused pid attributes to the NEW image, never the old ----------
