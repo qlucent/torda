@@ -155,6 +155,26 @@ pub fn record_rules(rec: &Value) -> BTreeSet<String> {
     out
 }
 
+/// The ATT&CK techniques a NORMALIZED PEER alert maps to (from its
+/// `attack_techniques` array — see the `peer` module). Empty for a torda OCSF
+/// record (torda is scored by rule, peers by technique).
+pub fn record_techniques(rec: &Value) -> Vec<String> {
+    rec.get("attack_techniques")
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// True when a captures file is a PEER run (scored by ATT&CK technique) rather
+/// than torda (scored by OCSF class + rule).
+pub fn is_peer_agent(agent: &str) -> bool {
+    agent != "torda"
+}
+
 /// Human name for an OCSF class UID, defined via the REAL [`torda_ocsf::class`]
 /// constants so a UID change in the agent is caught at compile time here.
 pub fn class_name(uid: u32) -> &'static str {

@@ -8,7 +8,10 @@ use std::collections::BTreeMap;
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::model::{record_class, record_rules, record_time_ms, Captures, Case, Expect};
+use crate::model::{
+    is_peer_agent, record_class, record_rules, record_techniques, record_time_ms, Captures, Case,
+    Expect,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum Verdict {
@@ -94,6 +97,7 @@ fn score_case(
     case: &Case,
     cap: Option<&crate::model::CaseCapture>,
     rule2tech: &BTreeMap<String, String>,
+    peer: bool,
 ) -> CaseResult {
     let mut result = CaseResult {
         case_id: case.id.clone(),
@@ -119,6 +123,39 @@ fn score_case(
                 .is_none_or(|e| in_window(e, cap.trigger_time, r))
         })
         .collect();
+
+    // PEER mode (Wazuh/Falco/…): the tool emits neither OCSF classes nor torda
+    // rule names, so it is scored by ATT&CK TECHNIQUE — HIT if an in-window alert
+    // maps to a component of this case's declared technique. An ATT&CK-tagged alert
+    // for a DIFFERENT technique is a cross-technique attribution (informational).
+    if peer {
+        let case_components: Vec<&str> = case.attack_technique.split('+').collect();
+        let mut matched = false;
+        for r in &windowed {
+            let techs = record_techniques(r);
+            if techs.iter().any(|t| case_components.contains(&t.as_str())) {
+                matched = true;
+            } else if !techs.is_empty() {
+                if let Some(rule) = r.get("rule").and_then(Value::as_str) {
+                    if !result.fp_rules.iter().any(|x| x == rule) {
+                        result.fp_rules.push(rule.to_string());
+                    }
+                }
+            }
+        }
+        result.verdict = if case.expected_result == "miss" {
+            if matched {
+                Verdict::GapClosed
+            } else {
+                Verdict::Gap
+            }
+        } else if matched {
+            Verdict::Hit
+        } else {
+            Verdict::Miss
+        };
+        return result;
+    }
 
     // False positives: an in-window record whose rule belongs to a technique that
     // shares NO component with this case. A chain case declares a compound
@@ -194,6 +231,7 @@ fn score_case(
 }
 
 pub fn score(cases: &[Case], captures: &Captures) -> Scored {
+    let peer = is_peer_agent(&captures.agent);
     let rule2tech = rule_to_technique(cases);
     let by_id: BTreeMap<&str, &crate::model::CaseCapture> = captures
         .cases
@@ -203,7 +241,7 @@ pub fn score(cases: &[Case], captures: &Captures) -> Scored {
 
     let results: Vec<CaseResult> = cases
         .iter()
-        .map(|c| score_case(c, by_id.get(c.id.as_str()).copied(), &rule2tech))
+        .map(|c| score_case(c, by_id.get(c.id.as_str()).copied(), &rule2tech, peer))
         .collect();
 
     let tier_a_total = results.iter().filter(|r| r.tier == "A").count();
@@ -223,10 +261,19 @@ pub fn score(cases: &[Case], captures: &Captures) -> Scored {
     let mut idle_fp_rules: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     let mut idle_false_positives = 0usize;
     for rec in &captures.baseline {
-        let rules = record_rules(rec);
-        if !rules.is_empty() {
+        if peer {
+            // Every peer alert during the idle window is a false positive (it fired
+            // against benign background); label it by the peer rule.
             idle_false_positives += 1;
-            idle_fp_rules.extend(rules);
+            if let Some(r) = rec.get("rule").and_then(Value::as_str) {
+                idle_fp_rules.insert(r.to_string());
+            }
+        } else {
+            let rules = record_rules(rec);
+            if !rules.is_empty() {
+                idle_false_positives += 1;
+                idle_fp_rules.extend(rules);
+            }
         }
     }
 
@@ -302,6 +349,7 @@ pub fn all_tier_a_hit(s: &Scored) -> bool {
 mod tests {
     use super::*;
     use crate::model::load_captures;
+    use serde_json::json;
 
     fn fixture() -> (Vec<Case>, Captures) {
         let root = env!("CARGO_MANIFEST_DIR");
@@ -361,6 +409,49 @@ mod tests {
         // and one benign record → exactly one idle FP.
         assert_eq!(s.idle_false_positives, 1);
         assert_eq!(s.idle_fp_rules, vec!["suspicious_port".to_string()]);
+    }
+
+    #[test]
+    fn peer_mode_scores_by_attack_technique() {
+        let root = env!("CARGO_MANIFEST_DIR");
+        let cases = crate::model::load_registry(format!("{root}/config/techniques.toml")).unwrap();
+        // A peer (wazuh) captures file: records carry `attack_techniques`, scored by
+        // technique, not OCSF class/rule.
+        let caps = Captures {
+            run_id: "t".into(),
+            agent: "wazuh".into(),
+            cases: vec![
+                crate::model::CaseCapture {
+                    case_id: "lolbin-basic".into(), // technique T1059
+                    trigger_time: 0,
+                    records: vec![json!({"attack_techniques": ["T1059"], "rule": "wazuh:92052"})],
+                },
+                crate::model::CaseCapture {
+                    case_id: "c2-port-connect".into(), // technique T1571
+                    trigger_time: 0,
+                    records: vec![json!({"attack_techniques": ["T1046"], "rule": "wazuh:200"})],
+                },
+                crate::model::CaseCapture {
+                    case_id: "chain-dropper-c2".into(), // compound T1105+T1571
+                    trigger_time: 0,
+                    records: vec![json!({"attack_techniques": ["T1571"], "rule": "wazuh:9"})],
+                },
+            ],
+            baseline: vec![json!({"attack_techniques": [], "rule": "wazuh:5501"})],
+        };
+        let s = score(&cases, &caps);
+        assert_eq!(verdict(&s, "lolbin-basic"), Verdict::Hit); // T1059 matches
+        assert_eq!(verdict(&s, "c2-port-connect"), Verdict::Miss); // T1046 != T1571
+        assert_eq!(verdict(&s, "chain-dropper-c2"), Verdict::Hit); // T1571 is a component
+                                                                   // The wrong-technique alert is a cross-technique attribution.
+        let c2 = s
+            .results
+            .iter()
+            .find(|r| r.case_id == "c2-port-connect")
+            .unwrap();
+        assert!(c2.fp_rules.contains(&"wazuh:200".to_string()));
+        // Every idle alert is a peer FP.
+        assert_eq!(s.idle_false_positives, 1);
     }
 
     #[test]

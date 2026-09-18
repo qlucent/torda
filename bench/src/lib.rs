@@ -15,6 +15,7 @@ pub mod capture;
 pub mod conformance;
 pub mod latency;
 pub mod model;
+pub mod peer;
 pub mod report;
 pub mod score;
 
