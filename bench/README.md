@@ -59,8 +59,17 @@ exits non-zero if any Tier-A case is not `HIT`, so `make`/CI can gate on it.
   after the P0-1 ancestry-correlation slice. The harness reports improvements, it
   doesn't hide them.
 
-Verdicts (spec §6.1): `HIT` / `MISS` / `PARTIAL` (right class, wrong rule) / FP
-attribution for Tier A; `GAP` / `GAP_CLOSED` for Tier B.
+Verdicts (spec §6.1): `HIT` / `MISS` / `PARTIAL` (right class, wrong rule) for
+Tier A; `GAP` / `GAP_CLOSED` for Tier B.
+
+## False positives
+
+The trustworthy FP number is the **idle-baseline FP**: before any atomic runs,
+`run` captures a quiet window (`--baseline-secs`, default 10s) and counts every
+detection that fires against benign background activity — 0 is the goal. The
+per-case *cross-technique attribution* count is reported too but is only
+informational: a multi-behavior atomic (a chain case) legitimately fires its own
+component rules, so it over-counts.
 
 ## Layout
 
