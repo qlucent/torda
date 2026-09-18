@@ -84,5 +84,19 @@
       "trigger_time": 7000,
       "records": []
     }
+  ],
+  "baseline": [
+    {
+      "class_uid": 4001, "class_name": "Network Activity", "time": 500, "severity_id": 3,
+      "metadata": {"product": "torda", "version": "0.1.0", "tenant_id": "bench"},
+      "device": {"hostname": "target", "os": "Linux", "os_version": "22.04"},
+      "data": {"connection": {"dport": 4444}, "detections": [{"rule": "suspicious_port"}]}
+    },
+    {
+      "class_uid": 1007, "class_name": "Process Activity", "time": 600, "severity_id": 1,
+      "metadata": {"product": "torda", "version": "0.1.0", "tenant_id": "bench"},
+      "device": {"hostname": "target", "os": "Linux", "os_version": "22.04"},
+      "data": {"process": {"image": "/usr/bin/ls"}, "detections": []}
+    }
   ]
 }

@@ -99,6 +99,11 @@ pub struct Captures {
     pub agent: String,
     #[serde(default)]
     pub cases: Vec<CaseCapture>,
+    /// OCSF records captured during an IDLE window with NO atomic running — the
+    /// honest false-positive baseline (any detection here fired against benign
+    /// background activity). Empty when a run skipped the baseline.
+    #[serde(default)]
+    pub baseline: Vec<Value>,
 }
 fn default_agent() -> String {
     "torda".into()

@@ -2,7 +2,7 @@
 //!
 //!   torda-bench score  --registry <t.toml> --captures <c.json> [--out-dir <d>]
 //!   torda-bench run    --registry <t.toml> --sink <ndjson> [--tier AB] [--platform linux]
-//!                      [--results-root results] [--no-isolate] [--no-preflight]
+//!                      [--baseline-secs 10] [--results-root results] [--no-isolate] [--no-preflight]
 //!
 //! `score` is pure (works anywhere; the self-test path). `run` executes atomics
 //! and must run inside an isolated target with a live, privileged torda streaming
@@ -54,7 +54,7 @@ fn print_usage() {
         "torda-bench <score|run> [flags]\n\
          \n  score --registry <t.toml> --captures <c.json> [--out-dir <d>]\n\
          \n  run   --registry <t.toml> --sink <ndjson> [--tier AB] [--platform linux]\n\
-         \n        [--results-root results] [--no-isolate] [--no-preflight]"
+         \n        [--baseline-secs 10] [--results-root results] [--no-isolate] [--no-preflight]"
     );
 }
 
@@ -209,6 +209,21 @@ fn cmd_run(flags: &HashMap<String, String>) -> Result<()> {
         .filter(|c| c.platform == platform && tier.contains(&c.tier.chars().next().unwrap_or('A')))
         .collect();
 
+    // IDLE BASELINE FIRST (before any atomic, incl. preflight): capture a quiet
+    // window with nothing malicious running. Any detection here is a genuine false
+    // positive against benign background activity — the honest FP metric.
+    let baseline_secs: f64 = flag(flags, "baseline-secs")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(10.0);
+    let baseline = if baseline_secs > 0.0 {
+        eprintln!("[baseline] capturing a {baseline_secs}s idle window (no atomic)...");
+        let t0 = capture::now_ms();
+        std::thread::sleep(std::time::Duration::from_secs_f64(baseline_secs));
+        capture::window(&capture::read_ndjson(sink), t0, baseline_secs)
+    } else {
+        vec![]
+    };
+
     // Preflight (spec §12): one known-good atomic must land, else abort so a
     // stub/unprivileged agent can't produce a suite of false MISSes.
     if flag(flags, "no-preflight").is_none() {
@@ -228,6 +243,7 @@ fn cmd_run(flags: &HashMap<String, String>) -> Result<()> {
         run_id: run_id.clone(),
         agent: flag(flags, "agent").unwrap_or("torda").to_string(),
         cases: vec![],
+        baseline,
     };
     for c in &cases {
         eprintln!("[run] {} ({})", c.id, c.attack_technique);

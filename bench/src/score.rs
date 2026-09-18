@@ -57,7 +57,15 @@ pub struct Scored {
     pub tier_a_total: usize,
     pub tier_a_hits: usize,
     pub coverage_pct: f64,
-    pub false_positives: usize,
+    /// The HONEST false-positive number: detection-bearing records seen during the
+    /// idle baseline (nothing malicious running). 0 is the goal.
+    pub idle_false_positives: usize,
+    /// The distinct rules that fired during the idle baseline.
+    pub idle_fp_rules: Vec<String>,
+    /// Per-case cross-technique attributions — informational only; noisy for
+    /// multi-behavior atomics (a chain case fires its own component rules). The
+    /// `idle_false_positives` above is the metric to trust.
+    pub cross_technique_hits: usize,
     pub gap_closed: Vec<String>,
     pub results: Vec<CaseResult>,
 }
@@ -203,12 +211,24 @@ pub fn score(cases: &[Case], captures: &Captures) -> Scored {
         .iter()
         .filter(|r| r.tier == "A" && r.verdict == Verdict::Hit)
         .count();
-    let false_positives = results.iter().map(|r| r.fp_rules.len()).sum();
+    let cross_technique_hits = results.iter().map(|r| r.fp_rules.len()).sum();
     let gap_closed = results
         .iter()
         .filter(|r| r.verdict == Verdict::GapClosed)
         .map(|r| r.case_id.clone())
         .collect();
+
+    // Idle-baseline FP: a detection-bearing record during the no-atomic window is
+    // a genuine false positive (it fired against benign background activity).
+    let mut idle_fp_rules: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut idle_false_positives = 0usize;
+    for rec in &captures.baseline {
+        let rules = record_rules(rec);
+        if !rules.is_empty() {
+            idle_false_positives += 1;
+            idle_fp_rules.extend(rules);
+        }
+    }
 
     Scored {
         agent: captures.agent.clone(),
@@ -220,7 +240,9 @@ pub fn score(cases: &[Case], captures: &Captures) -> Scored {
         } else {
             (1000.0 * tier_a_hits as f64 / tier_a_total as f64).round() / 10.0
         },
-        false_positives,
+        idle_false_positives,
+        idle_fp_rules: idle_fp_rules.into_iter().collect(),
+        cross_technique_hits,
         gap_closed,
         results,
     }
@@ -233,7 +255,19 @@ pub fn matrix_md(s: &Scored) -> String {
         "- Tier-A coverage: **{}/{} ({}%)**\n",
         s.tier_a_hits, s.tier_a_total, s.coverage_pct
     ));
-    out.push_str(&format!("- False positives: **{}**\n", s.false_positives));
+    out.push_str(&format!(
+        "- Idle-baseline false positives: **{}**{}\n",
+        s.idle_false_positives,
+        if s.idle_fp_rules.is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", s.idle_fp_rules.join(", "))
+        }
+    ));
+    out.push_str(&format!(
+        "- Cross-technique attributions (informational): {}\n",
+        s.cross_technique_hits
+    ));
     if !s.gap_closed.is_empty() {
         out.push_str(&format!(
             "- Gap-closed (Tier-B now detected): **{}**\n",
@@ -316,7 +350,17 @@ mod tests {
             .find(|r| r.case_id == "c2-port-connect")
             .unwrap();
         assert!(c2.fp_rules.contains(&"lolbin".to_string()));
-        assert!(s.false_positives >= 1);
+        assert!(s.cross_technique_hits >= 1);
+    }
+
+    #[test]
+    fn idle_baseline_false_positives() {
+        let (cases, caps) = fixture();
+        let s = score(&cases, &caps);
+        // The fixture baseline has one detection-bearing record (suspicious_port)
+        // and one benign record → exactly one idle FP.
+        assert_eq!(s.idle_false_positives, 1);
+        assert_eq!(s.idle_fp_rules, vec!["suspicious_port".to_string()]);
     }
 
     #[test]

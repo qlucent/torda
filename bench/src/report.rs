@@ -10,12 +10,18 @@ pub fn build_report(run_id: &str, scored: &Scored, lat: &Latency, conf: &Conform
 
     o.push_str("## Detection coverage (Tier A)\n\n");
     o.push_str(&format!(
-        "- **{}/{} ({}%)** — agent `{}`\n- False positives: {}\n",
+        "- **{}/{} ({}%)** — agent `{}`\n- Idle-baseline false positives: **{}**{}\n- Cross-technique attributions (informational): {}\n",
         scored.tier_a_hits,
         scored.tier_a_total,
         scored.coverage_pct,
         scored.agent,
-        scored.false_positives
+        scored.idle_false_positives,
+        if scored.idle_fp_rules.is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", scored.idle_fp_rules.join(", "))
+        },
+        scored.cross_technique_hits
     ));
     if !scored.gap_closed.is_empty() {
         o.push_str(&format!(
