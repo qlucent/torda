@@ -65,6 +65,26 @@ across these M hosts." (The bundled NVD snapshot is a small, date-stamped
 *community* feed with a curated common-app mapping; a live NVD sync with full CPE
 matching is the enterprise feed, behind the same interface.)
 
+## Benchmarks — claims backed by reproducible numbers
+
+We don't ask you to take detection claims on faith. `bench/` is a
+framework-anchored harness that runs ATT&CK atomics on a disposable target,
+captures the OCSF stream, and scores it against **declared** ground truth. From
+the [latest verified run](bench/RESULTS.md) (GCP, Ubuntu 22.04, kernel 6.8, real
+eBPF):
+
+- **ATT&CK Tier-A detection coverage: 11/11 (100%)** — `torda-bench score` exits
+  non-zero if any case misses, so this is a gate, not a boast.
+- **OCSF conformance: 100%** of emitted records, validated against the real
+  envelope type.
+- **Idle-baseline false positives: 0** (detections while nothing malicious runs).
+- **Peer parity** vs Falco and Wazuh on the same atomics — with an honest reading
+  of where strict per-technique scoring credits torda's precise, low-noise output.
+
+Reproduce it yourself: `cargo test -p torda-bench` (the pure scoring loop, runs
+anywhere) or, on a privileged Linux target, `cd bench && make bootstrap && make
+bench-linux`. Full method + tables: **[bench/RESULTS.md](bench/RESULTS.md)**.
+
 ## Quickstart — the ~1-hour tryable path
 
 Run all `cargo` commands from the repo root (it **is** the Cargo workspace).
