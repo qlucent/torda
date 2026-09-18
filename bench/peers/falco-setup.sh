@@ -16,10 +16,12 @@ echo "falco falco/driver_choice select modern-bpf" | debconf-set-selections
 apt-get update -qq
 apt-get install -y -qq falco >/dev/null
 
-echo "=== run falco → JSON alerts at /var/log/falco.json ==="
+echo "=== run falco (modern eBPF via config override) → JSON at /var/log/falco.json ==="
 pkill -f 'falco ' 2>/dev/null || true
 sleep 1
-falco --modern-bpf \
+# Current Falco selects the driver via `engine.kind` (the old `--modern-bpf` CLI
+# flag was removed). modern_ebpf is CO-RE — no kernel headers/driver build needed.
+falco -o engine.kind=modern_ebpf \
   -o json_output=true \
   -o file_output.enabled=true \
   -o file_output.filename=/var/log/falco.json \

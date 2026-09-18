@@ -12,13 +12,14 @@
 # honest measurement of a log/FIM-based HIDS vs an eBPF agent — not a mis-config.
 set -eu
 export DEBIAN_FRONTEND=noninteractive
-WAZUH_VERSION="${WAZUH_VERSION:-4.9}"
 
-echo "=== install wazuh-manager ${WAZUH_VERSION} + auditd ==="
+echo "=== install wazuh-manager (4.x apt repo) + auditd ==="
 curl -s https://packages.wazuh.com/key/GPG-KEY-WAZUH | gpg --no-default-keyring \
   --keyring gnupg-ring:/usr/share/keyrings/wazuh.gpg --import
 chmod 644 /usr/share/keyrings/wazuh.gpg
-echo "deb [signed-by=/usr/share/keyrings/wazuh.gpg] https://packages.wazuh.com/${WAZUH_VERSION}/apt/ stable main" \
+# The Wazuh apt repo path is the literal "4.x" (a major-line channel), NOT a
+# specific minor like 4.9 — the latter 403s.
+echo "deb [signed-by=/usr/share/keyrings/wazuh.gpg] https://packages.wazuh.com/4.x/apt/ stable main" \
   > /etc/apt/sources.list.d/wazuh.list
 apt-get update -qq
 apt-get install -y -qq wazuh-manager auditd >/dev/null
