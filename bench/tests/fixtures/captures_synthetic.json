@@ -1,0 +1,88 @@
+{
+  "run_id": "synthetic-0001",
+  "agent": "torda",
+  "note": "Hand-crafted OCSF windows exercising every score.py verdict WITHOUT a live agent. Record shape mirrors crates/ocsf OcsfEnvelope.",
+  "cases": [
+    {
+      "case_id": "lolbin-basic",
+      "trigger_time": 1000,
+      "records": [
+        {
+          "class_uid": 1007, "class_name": "Process Activity", "time": 1500, "severity_id": 3,
+          "metadata": {"product": "torda", "version": "0.1.0", "tenant_id": "bench"},
+          "device": {"hostname": "target", "os": "Linux", "os_version": "22.04"},
+          "data": {"process": {"image": "/usr/bin/base64"}, "detections": [{"rule": "lolbin", "reason": "base64 is a lolbin"}]}
+        }
+      ]
+    },
+    {
+      "case_id": "lolbin-susp-path",
+      "trigger_time": 2000,
+      "records": [
+        {
+          "class_uid": 1007, "class_name": "Process Activity", "time": 2300, "severity_id": 4,
+          "metadata": {"product": "torda", "version": "0.1.0", "tenant_id": "bench"},
+          "device": {"hostname": "target", "os": "Linux", "os_version": "22.04"},
+          "data": {"process": {"image": "/tmp/nc"}, "detections": [{"rule": "lolbin_in_suspicious_path", "reason": "lolbin in /tmp"}]}
+        }
+      ]
+    },
+    {
+      "case_id": "susp-path-exec",
+      "trigger_time": 3000,
+      "records": [
+        {
+          "class_uid": 1007, "class_name": "Process Activity", "time": 3200, "severity_id": 1,
+          "metadata": {"product": "torda", "version": "0.1.0", "tenant_id": "bench"},
+          "device": {"hostname": "target", "os": "Linux", "os_version": "22.04"},
+          "data": {"process": {"image": "/tmp/xtrue"}, "detections": []}
+        }
+      ]
+    },
+    {
+      "case_id": "c2-port-connect",
+      "trigger_time": 4000,
+      "records": [
+        {
+          "class_uid": 4001, "class_name": "Network Activity", "time": 4400, "severity_id": 3,
+          "metadata": {"product": "torda", "version": "0.1.0", "tenant_id": "bench"},
+          "device": {"hostname": "target", "os": "Linux", "os_version": "22.04"},
+          "data": {"connection": {"dport": 4444}, "detections": [{"rule": "suspicious_port"}]}
+        },
+        {
+          "class_uid": 1007, "class_name": "Process Activity", "time": 4100, "severity_id": 3,
+          "metadata": {"product": "torda", "version": "0.1.0", "tenant_id": "bench"},
+          "device": {"hostname": "target", "os": "Linux", "os_version": "22.04"},
+          "data": {"process": {"image": "/usr/bin/xxd"}, "detections": [{"rule": "lolbin"}]}
+        }
+      ]
+    },
+    {
+      "case_id": "write-system-dir",
+      "trigger_time": 5000,
+      "records": []
+    },
+    {
+      "case_id": "ancestry-chain",
+      "trigger_time": 6000,
+      "records": [
+        {
+          "class_uid": 9002, "class_name": "Correlated Activity", "time": 6500, "severity_id": 4,
+          "metadata": {"product": "torda", "version": "0.1.0", "tenant_id": "bench"},
+          "device": {"hostname": "target", "os": "Linux", "os_version": "22.04"},
+          "data": {
+            "activity": "process_network",
+            "detections": [{"rule": "suspicious_process_suspicious_connection"}],
+            "process": {"pid": 9, "image": "/bin/bash", "detections": [{"rule": "suspicious_ancestor", "reason": "inherited from /tmp/nc"}]},
+            "connection": {"daddr": "203.0.113.1", "dport": 4444}
+          }
+        }
+      ]
+    },
+    {
+      "case_id": "proc-injection",
+      "trigger_time": 7000,
+      "records": []
+    }
+  ]
+}

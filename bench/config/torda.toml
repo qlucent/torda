@@ -1,0 +1,24 @@
+# torda agent config used for the benchmark run.
+#
+# The harness scores by tailing the OCSF NDJSON that `--output` writes, so point
+# the sink there and run as a daemon. Snapshot refresh is turned DOWN to keep the
+# capture windows quiet (the ATT&CK cases exercise the EVENT sensors, not the
+# periodic snapshots); the scheduled-task Tier-B case bumps fim/drift back up via
+# its own longer window if you want to test P0-3 catching a cron write.
+[agent]
+daemon = true
+
+[output]
+sink = "file"
+path = "/var/log/torda/bench.ndjson"
+rotate_mb = 128
+
+# Per-module periodic-refresh intervals (seconds; 0 = one-shot at startup). Kept
+# off for the event-detection suite so snapshot re-emits don't pollute windows.
+[refresh]
+asset = 0
+vuln = 0
+compliance = 0
+drift = 0
+fim = 0
+health = 0

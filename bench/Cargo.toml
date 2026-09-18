@@ -1,0 +1,24 @@
+[package]
+name = "torda-bench"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+repository.workspace = true
+description = "Framework-anchored benchmark harness for the torda agent (Apache-2.0, open by design so the numbers are reproducible)."
+
+[lib]
+name = "torda_bench"
+path = "src/lib.rs"
+
+[[bin]]
+name = "torda-bench"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+# Links the REAL OCSF envelope + class UIDs so scoring/conformance check against
+# the source of truth, not a hand-copied table.
+torda-ocsf = { path = "../crates/ocsf" }
