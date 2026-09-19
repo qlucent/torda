@@ -333,7 +333,10 @@ mod tests {
         assert_eq!(out.len(), 1);
         let d = &out[0].data;
         assert_eq!(out[0].class_uid, class::AI_INVENTORY_INFO);
-        assert_eq!(out[0].severity_id, 1, "telemetry — decision is the backend's");
+        assert_eq!(
+            out[0].severity_id, 1,
+            "telemetry — decision is the backend's"
+        );
         assert_eq!(d["kind"], "ai_tool_egress");
         assert_eq!(d["tool"], "cursor");
         assert_eq!(d["process"]["pid"], 4242);
@@ -355,7 +358,10 @@ mod tests {
                 &em,
             );
         }
-        assert!(em.emitted.lock().unwrap().is_empty(), "local egress must not emit");
+        assert!(
+            em.emitted.lock().unwrap().is_empty(),
+            "local egress must not emit"
+        );
     }
 
     #[test]
