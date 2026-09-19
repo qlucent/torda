@@ -1,23 +1,36 @@
 //! AI-usage module — endpoint visibility into AI **developer tools** (CLI + IDE
-//! assistants) and their outbound network egress.
+//! assistants) and where they connect.
 //!
 //! This is the agent-side, open-source half of the "AI egress / CLI-IDE tool
 //! visibility" wedge: the market's structural blind spot is that AI coding tools
 //! (Cursor, Claude Code, aider, GitHub Copilot, Codeium, …) talk to model APIs
 //! straight off a developer's box, invisible to a network DLP proxy. Torda already
 //! sees every process and every connection at the kernel; this module joins the
-//! two by process identity — when a *known AI tool* makes an *off-box* connection,
-//! it emits an OCSF AI Inventory Info (`9004`) record of kind `ai_tool_egress`.
+//! two by process identity — when a *known AI tool* makes a connection, it emits
+//! an OCSF AI Inventory Info (`9004`) record with the connection's **scope**:
+//!
+//! - `external` (public dest) → `kind: "ai_tool_egress"` — the shadow-AI-egress
+//!   concern: code/context leaving the box to a cloud model API.
+//! - `loopback` (`127.0.0.0/8`, `::1`) → `kind: "ai_tool_local"`, `scope: "loopback"`
+//!   — the tool is using a model runtime ON this host (e.g. a local Ollama). This
+//!   is the *opposite* risk profile: data stays on the box. The backend can join it
+//!   with `aidiscovery`'s discovered runtimes (by port) to name the local model.
+//! - `private` (RFC1918/link-local/ULA) → `kind: "ai_tool_local"`, `scope: "private"`
+//!   — an intra-network AI service (e.g. a self-hosted gateway).
+//!
+//! Capturing local connections (not just egress) lets the backend show
+//! **cloud-vs-local AI usage per host/tool** — local is often the sanctioned,
+//! privacy-preserving path, so it is a signal, not noise.
 //!
 //! **Discovery only (open-source, in the agent).** It reports *that* an AI tool
-//! egressed — it never inspects payloads or TLS content (that's the research bet,
-//! not this slice). Deciding whether that egress is *sanctioned* — per host, per
-//! owner, against a tenant allowlist — is the backend's job (the paid platform).
+//! connected and the scope — it never inspects payloads or TLS content (that's the
+//! research bet, not this slice). Deciding whether use is *sanctioned* — per host,
+//! per owner, against a tenant allowlist — is the backend's job (the paid platform).
 //! Discovery is open; the decision is paid.
 //!
 //! It CONSUMES the shared `NetConnect` bus (the substrate is the only door — it
 //! opens no probes of its own) and reuses `torda-mod-netmon`'s single canonical
-//! definition of "external" so "off-box egress" means exactly one thing agent-wide.
+//! definition of "external" so "off-box" means exactly one thing agent-wide.
 //!
 //! Limitation (documented, v1): detection is by the connecting process's image
 //! basename, so a tool that runs *inside* a generic interpreter (an aider or a
@@ -25,6 +38,7 @@
 //! / parent-chain attribution is a follow-up; the connect event carries only the
 //! kernel `comm`/image today.
 use async_trait::async_trait;
+use std::net::IpAddr;
 use std::time::Duration;
 use tokio::sync::broadcast::error::RecvError;
 use torda_core::{EventKind, Module, ModuleCtx, ModuleHealth, ModuleId, SubstrateEvent};
@@ -93,8 +107,25 @@ pub fn match_tool(image: &str) -> Option<&'static str> {
     None
 }
 
-/// AI-usage module: subscribes to `NetConnect` and emits one `ai_tool_egress`
-/// record whenever a known AI developer tool connects off-box.
+/// Classify a connection destination's scope for AI-usage reporting, reusing
+/// `netmon`'s single definition of "external". Returns `None` for an address we
+/// can't parse (we never guess a scope from an unparseable string). Loopback is
+/// checked FIRST so `127.0.0.1`/`::1` never fall through to `private`.
+fn classify_scope(daddr: &str) -> Option<&'static str> {
+    let ip: IpAddr = daddr.parse().ok()?;
+    if ip.is_loopback() {
+        return Some("loopback");
+    }
+    if torda_mod_netmon::is_external(daddr) {
+        return Some("external");
+    }
+    // RFC1918 / link-local / ULA / unspecified — reachable, but not off-box.
+    Some("private")
+}
+
+/// AI-usage module: subscribes to `NetConnect` and emits one `9004` record per
+/// connection a known AI developer tool makes, tagged with the connection scope
+/// (external egress vs local/loopback runtime use).
 #[derive(Default)]
 pub struct AiUsageModule {
     ctx: Option<ModuleCtx>,
@@ -111,14 +142,17 @@ impl AiUsageModule {
 }
 
 /// Extract the connection fields from a `NetConnect` event and, IFF the
-/// connecting process is a catalogued AI tool making an EXTERNAL (off-box)
-/// connection, emit its `ai_tool_egress` record. Everything else is dropped:
+/// connecting process is a catalogued AI tool, emit its `9004` record tagged with
+/// the connection scope. Dropped only when:
 ///
 /// - non-`NetConnect` kind (the stub bus forwards all kinds) → drop,
 /// - malformed event (missing/unparseable required field) → drop (never a panic),
 /// - process not an AI tool → drop (this is not a generic net sensor; netmon is),
-/// - destination not external (loopback/RFC1918/link-local, e.g. a local Ollama)
-///   → drop: local use is not off-box egress, which is the whole concern here.
+/// - destination address doesn't parse → drop (we can't classify its scope).
+///
+/// Emits BOTH off-box egress (`kind: "ai_tool_egress"`, scope `external`) and
+/// local/loopback/private connections (`kind: "ai_tool_local"`) — the latter is the
+/// "which tools use a LOCAL model runtime" signal, not noise.
 fn handle_event(
     ev: &SubstrateEvent,
     meta: &Metadata,
@@ -140,12 +174,12 @@ fn handle_event(
         Some(s) => s,
         None => return,
     };
-    // Off-box only: a known AI tool talking to a LOCAL runtime (e.g. an editor to
-    // a loopback Ollama) is not the egress concern. One definition of "external",
-    // shared with netmon.
-    if !torda_mod_netmon::is_external(daddr) {
-        return;
-    }
+    // Classify the destination scope (one definition of "external", shared with
+    // netmon). An unparseable address can't be classified → drop.
+    let scope = match classify_scope(daddr) {
+        Some(s) => s,
+        None => return,
+    };
     let dport: u16 = match ev
         .fields
         .get("dport")
@@ -165,15 +199,25 @@ fn handle_event(
         .and_then(serde_json::Value::as_str)
         .unwrap_or("tcp");
 
-    // Informational by design: emitting is telemetry/discovery. Whether this
-    // egress is unsanctioned is a policy decision the backend makes.
+    // `ai_tool_egress` stays the kind for off-box egress (unchanged contract);
+    // local/private connections get `ai_tool_local`. `scope` is on both so the
+    // backend keys cloud-vs-local off one field.
+    let kind = if scope == "external" {
+        "ai_tool_egress"
+    } else {
+        "ai_tool_local"
+    };
+
+    // Informational by design: emitting is telemetry/discovery. Whether the usage
+    // is sanctioned is a policy decision the backend makes.
     emitter.emit(OcsfEnvelope::new(
         class::AI_INVENTORY_INFO,
         "AI Inventory Info",
         meta.clone(),
         device.clone(),
         serde_json::json!({
-            "kind": "ai_tool_egress",
+            "kind": kind,
+            "scope": scope,
             "tool": tool,
             "process": { "pid": pid, "image": image },
             "connection": { "daddr": daddr, "dport": dport, "proto": proto },
@@ -353,6 +397,7 @@ mod tests {
             "telemetry — decision is the backend's"
         );
         assert_eq!(d["kind"], "ai_tool_egress");
+        assert_eq!(d["scope"], "external");
         assert_eq!(d["tool"], "cursor");
         assert_eq!(d["process"]["pid"], 4242);
         assert_eq!(d["connection"]["daddr"], "203.0.113.10");
@@ -378,35 +423,74 @@ mod tests {
         let out = em.emitted.lock().unwrap();
         assert_eq!(out.len(), 1, "claude.exe egress over IPv6 must be reported");
         assert_eq!(out[0].data["tool"], "claude-code");
+        assert_eq!(out[0].data["scope"], "external");
         assert_eq!(out[0].data["connection"]["daddr"], "2607:6bc0::10");
     }
 
     #[test]
-    fn skips_ai_tool_to_local_runtime() {
-        // Editor → loopback Ollama is local use, NOT off-box egress.
-        let em = CapturingEmitter::default();
-        for local in [
-            "127.0.0.1",
-            "10.0.0.5",
-            "192.168.1.9",
-            "169.254.1.1",
-            "::1",        // IPv6 loopback
-            "fe80::1",    // IPv6 link-local
-            "fd00::1234", // IPv6 unique-local
-        ] {
+    fn emits_ai_tool_local_for_loopback_runtime() {
+        // Editor → loopback Ollama (:11434) is LOCAL use — now a first-class signal
+        // (`ai_tool_local`), not a drop. This is what the backend joins with
+        // aidiscovery to say "cursor is backed by a local model runtime".
+        for lo in ["127.0.0.1", "::1"] {
+            let em = CapturingEmitter::default();
             handle_event(
                 &connect(serde_json::json!({
-                    "pid": 1, "image": "cursor", "daddr": local, "dport": 11434, "proto": "tcp"
+                    "pid": 1, "image": "cursor", "daddr": lo, "dport": 11434, "proto": "tcp"
                 })),
                 &meta(),
                 &device(),
                 &em,
             );
+            let out = em.emitted.lock().unwrap();
+            assert_eq!(out.len(), 1, "{lo}: loopback AI-tool use must emit");
+            assert_eq!(out[0].data["kind"], "ai_tool_local");
+            assert_eq!(out[0].data["scope"], "loopback", "{lo}");
+            assert_eq!(out[0].data["tool"], "cursor");
+            assert_eq!(out[0].data["connection"]["dport"], 11434);
         }
-        assert!(
-            em.emitted.lock().unwrap().is_empty(),
-            "local egress must not emit"
+    }
+
+    #[test]
+    fn emits_ai_tool_local_with_private_scope() {
+        // RFC1918 / link-local / ULA → an intra-network AI service: `ai_tool_local`
+        // scope `private` (reachable, but not off-box egress).
+        for priv_addr in [
+            "10.0.0.5",
+            "192.168.1.9",
+            "169.254.1.1",
+            "fe80::1",
+            "fd00::1234",
+        ] {
+            let em = CapturingEmitter::default();
+            handle_event(
+                &connect(serde_json::json!({
+                    "pid": 1, "image": "aider", "daddr": priv_addr, "dport": 8080, "proto": "tcp"
+                })),
+                &meta(),
+                &device(),
+                &em,
+            );
+            let out = em.emitted.lock().unwrap();
+            assert_eq!(out.len(), 1, "{priv_addr}: private AI-tool use must emit");
+            assert_eq!(out[0].data["kind"], "ai_tool_local");
+            assert_eq!(out[0].data["scope"], "private", "{priv_addr}");
+        }
+    }
+
+    #[test]
+    fn skips_unparseable_destination() {
+        // We never guess a scope from an address we can't parse → drop, no panic.
+        let em = CapturingEmitter::default();
+        handle_event(
+            &connect(serde_json::json!({
+                "pid": 1, "image": "cursor", "daddr": "not-an-ip", "dport": 443
+            })),
+            &meta(),
+            &device(),
+            &em,
         );
+        assert!(em.emitted.lock().unwrap().is_empty());
     }
 
     #[test]
