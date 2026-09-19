@@ -32,12 +32,14 @@
 //! opens no probes of its own) and reuses `torda-mod-netmon`'s single canonical
 //! definition of "external" so "off-box" means exactly one thing agent-wide.
 //!
-//! Limitation (documented, v1): detection is by the connecting process's image
-//! basename, so a tool that runs *inside* a generic interpreter (an aider or a
-//! Copilot LSP launched as `node`/`python3`) is not attributed here. Command-line
-//! / parent-chain attribution is a follow-up; the connect event carries only the
-//! kernel `comm`/image today.
+//! Attribution: primarily by the connecting process's image (`comm`), and — when
+//! that `comm` is a bare interpreter (`python3`/`node`/…) hosting a tool — by the
+//! process's **cmdline**, captured from `ProcessExec` and looked up by pid at
+//! connect time (so `python3 …/aider`, `node …/claude` are attributed to the real
+//! tool, not dropped). Remaining gap: a tool named only in a deep path segment
+//! (e.g. `node …/copilot/dist/server.js`) is still not attributed.
 use async_trait::async_trait;
+use std::collections::HashMap;
 use std::net::IpAddr;
 use std::time::Duration;
 use tokio::sync::broadcast::error::RecvError;
@@ -67,28 +69,39 @@ const CATALOG: &[(&str, &str)] = &[
     ("chatgpt", "chatgpt"),
 ];
 
-/// The last path component of a process image, tolerating both `/` (Linux) and
-/// `\` (Windows) separators, with a trailing `.exe` stripped (Windows images are
-/// `claude.exe`, not `claude`). A bare name (already a basename, or a kernel
-/// `comm`) is returned unchanged apart from the extension.
+/// Generic interpreters that HOST an AI tool rather than being one: an aider or a
+/// Copilot LSP shows up as `python3`/`node`, not `aider`. When a connect's image is
+/// one of these, we fall back to the process's cmdline (captured at exec) to
+/// attribute the real tool. Matched on the basename (`.exe`-stripped).
+const INTERPRETERS: &[&str] = &[
+    "node", "python", "python3", "python2", "deno", "bun", "ruby", "npx", "uv", "uvx", "pipx",
+    "pnpm", "yarn",
+];
+
+/// Known script extensions to strip off a cmdline token before catalog matching
+/// (so `/usr/local/bin/aider`, `aider.py`, `copilot.js` all resolve to their name).
+const SCRIPT_EXTS: &[&str] = &[".py", ".js", ".mjs", ".cjs", ".exe"];
+
+/// The last path component of an image/token, tolerating `/` and `\` separators,
+/// with a single trailing known extension stripped (Windows images are
+/// `claude.exe`, a python entrypoint may be `aider.py`). A bare name is returned
+/// unchanged apart from the extension.
 fn basename(image: &str) -> &str {
     let name = image.rsplit(['/', '\\']).next().unwrap_or(image);
-    // Case-insensitive strip of a single trailing `.exe`.
-    if name.len() > 4 && name[name.len() - 4..].eq_ignore_ascii_case(".exe") {
-        &name[..name.len() - 4]
-    } else {
-        name
+    for ext in SCRIPT_EXTS {
+        if name.len() > ext.len() && name[name.len() - ext.len()..].eq_ignore_ascii_case(ext) {
+            return &name[..name.len() - ext.len()];
+        }
     }
+    name
 }
 
-/// Classify a connecting process's image against the AI-tool [`CATALOG`],
-/// returning the canonical tool name on a match. Case-insensitive on the
-/// basename, and **truncation-aware**: the kernel stamps `comm` into a 16-byte
-/// buffer (15 usable chars), so a long tool binary (e.g.
-/// `github-copilot-language-server`) arrives clipped to 15 chars — a basename of
+/// Match an already-basenamed process/script name against the AI-tool [`CATALOG`].
+/// Case-insensitive, and **truncation-aware**: the kernel stamps `comm` into a
+/// 16-byte buffer (15 usable chars), so a long tool binary (e.g.
+/// `github-copilot-language-server`) arrives clipped to 15 chars — a name of
 /// exactly 15 chars is matched as a prefix of a longer catalog entry.
-pub fn match_tool(image: &str) -> Option<&'static str> {
-    let b = basename(image);
+fn match_name(b: &str) -> Option<&'static str> {
     if b.is_empty() {
         return None;
     }
@@ -96,7 +109,6 @@ pub fn match_tool(image: &str) -> Option<&'static str> {
         if b.eq_ignore_ascii_case(needle) {
             return Some(canonical);
         }
-        // Kernel `comm` truncated to 15 chars → match as a prefix of a longer name.
         if b.len() == 15
             && needle.len() > 15
             && needle.as_bytes()[..15].eq_ignore_ascii_case(b.as_bytes())
@@ -105,6 +117,29 @@ pub fn match_tool(image: &str) -> Option<&'static str> {
         }
     }
     None
+}
+
+/// Classify a connecting process's image (its `comm`/path) against the catalog.
+pub fn match_tool(image: &str) -> Option<&'static str> {
+    match_name(basename(image))
+}
+
+/// Is this image a generic interpreter (so we should consult its cmdline)?
+fn is_interpreter(image: &str) -> bool {
+    let b = basename(image);
+    INTERPRETERS.iter().any(|i| b.eq_ignore_ascii_case(i))
+}
+
+/// Attribute an AI tool from a process's cmdline: scan argv tokens (skipping the
+/// leading interpreter and any `-flags`) and match each token's basename against
+/// the catalog. Catches `python3 /usr/local/bin/aider …`, `node …/claude`, etc.
+/// Returns the FIRST matched tool. (A tool buried only in a path segment — e.g.
+/// `node …/copilot/dist/server.js` — is a known remaining gap.)
+pub fn match_tool_in_cmdline(cmdline: &str) -> Option<&'static str> {
+    cmdline
+        .split_whitespace()
+        .filter(|tok| !tok.starts_with('-'))
+        .find_map(|tok| match_name(basename(tok)))
 }
 
 /// Classify a connection destination's scope for AI-usage reporting, reusing
@@ -141,20 +176,87 @@ impl AiUsageModule {
     }
 }
 
-/// Extract the connection fields from a `NetConnect` event and, IFF the
-/// connecting process is a catalogued AI tool, emit its `9004` record tagged with
-/// the connection scope. Dropped only when:
+/// Max interpreter pids tracked at once (bounds memory; evicts oldest on overflow).
+const MAX_TRACKED: usize = 4096;
+
+/// `pid → (attributed tool, event ts)` for interpreter processes running an AI
+/// script. Populated from `ProcessExec` (which carries the enriched cmdline),
+/// consulted on `NetConnect` when the connecting `comm` is a bare interpreter,
+/// cleared on `ProcessExit` (and on a non-AI re-exec of the pid — pid-reuse safe).
+type PidTools = HashMap<u64, (&'static str, i64)>;
+
+/// On `ProcessExec`: if the process is a generic interpreter running a catalogued
+/// AI tool (from its cmdline), remember `pid → tool` so a later connect from that
+/// pid is attributed. A non-interpreter (or an interpreter NOT running an AI tool)
+/// clears any stale entry for the pid, so a reused pid never mis-attributes.
+fn handle_exec(ev: &SubstrateEvent, pid_tools: &mut PidTools) {
+    if ev.kind != EventKind::ProcessExec {
+        return;
+    }
+    let pid = match ev.fields.get("pid").and_then(serde_json::Value::as_u64) {
+        Some(p) => p,
+        None => return,
+    };
+    let image = ev
+        .fields
+        .get("image")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    let tool = if is_interpreter(image) {
+        ev.fields
+            .get("cmdline")
+            .and_then(serde_json::Value::as_str)
+            .and_then(match_tool_in_cmdline)
+    } else {
+        None
+    };
+    match tool {
+        Some(t) => {
+            // Evict the oldest entry if we're at the cap and this is a new pid.
+            if pid_tools.len() >= MAX_TRACKED && !pid_tools.contains_key(&pid) {
+                if let Some(oldest) = pid_tools
+                    .iter()
+                    .min_by_key(|(_, (_, ts))| *ts)
+                    .map(|(k, _)| *k)
+                {
+                    pid_tools.remove(&oldest);
+                }
+            }
+            pid_tools.insert(pid, (t, ev.ts));
+        }
+        // Pid reused by a non-AI exec (or an interpreter not running an AI tool):
+        // drop any stale attribution so the next connect can't inherit it.
+        None => {
+            pid_tools.remove(&pid);
+        }
+    }
+}
+
+/// On `ProcessExit`: forget the pid (bounds the map; prevents pid-reuse bleed).
+fn handle_exit(ev: &SubstrateEvent, pid_tools: &mut PidTools) {
+    if ev.kind != EventKind::ProcessExit {
+        return;
+    }
+    if let Some(pid) = ev.fields.get("pid").and_then(serde_json::Value::as_u64) {
+        pid_tools.remove(&pid);
+    }
+}
+
+/// On `NetConnect`: attribute the connection to an AI tool — directly from the
+/// process `comm`, or (when `comm` is a bare interpreter) from the cmdline-derived
+/// `pid_tools` map — and emit its scoped `9004` record. Dropped only when:
 ///
 /// - non-`NetConnect` kind (the stub bus forwards all kinds) → drop,
 /// - malformed event (missing/unparseable required field) → drop (never a panic),
-/// - process not an AI tool → drop (this is not a generic net sensor; netmon is),
+/// - not attributable to an AI tool → drop (this is not a generic net sensor),
 /// - destination address doesn't parse → drop (we can't classify its scope).
 ///
-/// Emits BOTH off-box egress (`kind: "ai_tool_egress"`, scope `external`) and
-/// local/loopback/private connections (`kind: "ai_tool_local"`) — the latter is the
-/// "which tools use a LOCAL model runtime" signal, not noise.
-fn handle_event(
+/// Emits off-box egress (`kind: "ai_tool_egress"`, scope `external`) and
+/// local/loopback/private connections (`kind: "ai_tool_local"`); `via` records how
+/// the tool was attributed (`comm` vs `cmdline`).
+fn handle_connect(
     ev: &SubstrateEvent,
+    pid_tools: &PidTools,
     meta: &Metadata,
     device: &Device,
     emitter: &dyn torda_core::OcsfEmitter,
@@ -166,9 +268,20 @@ fn handle_event(
         Some(s) => s,
         None => return,
     };
-    let tool = match match_tool(image) {
-        Some(t) => t,
+    let pid = match ev.fields.get("pid").and_then(serde_json::Value::as_u64) {
+        Some(p) => p,
         None => return,
+    };
+    // Attribute: direct comm match first; else an interpreter's cmdline (from exec).
+    let (tool, via) = if let Some(t) = match_tool(image) {
+        (t, "comm")
+    } else if is_interpreter(image) {
+        match pid_tools.get(&pid) {
+            Some((t, _)) => (*t, "cmdline"),
+            None => return,
+        }
+    } else {
+        return;
     };
     let daddr = match ev.fields.get("daddr").and_then(serde_json::Value::as_str) {
         Some(s) => s,
@@ -186,10 +299,6 @@ fn handle_event(
         .and_then(serde_json::Value::as_u64)
         .and_then(|p| p.try_into().ok())
     {
-        Some(p) => p,
-        None => return,
-    };
-    let pid = match ev.fields.get("pid").and_then(serde_json::Value::as_u64) {
         Some(p) => p,
         None => return,
     };
@@ -219,6 +328,7 @@ fn handle_event(
             "kind": kind,
             "scope": scope,
             "tool": tool,
+            "via": via,
             "process": { "pid": pid, "image": image },
             "connection": { "daddr": daddr, "dport": dport, "proto": proto },
         }),
@@ -242,13 +352,21 @@ impl Module for AiUsageModule {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("aiusage: init before start"))?;
 
-        let mut rx = ctx.bus.subscribe(&[EventKind::NetConnect]);
+        // Also subscribe ProcessExec/Exit so we can attribute interpreter-hosted
+        // tools (aider as python3, a Copilot LSP as node) via their cmdline.
+        let mut rx = ctx.bus.subscribe(&[
+            EventKind::ProcessExec,
+            EventKind::ProcessExit,
+            EventKind::NetConnect,
+        ]);
         let meta = ctx.meta();
         let device = ctx.snapshot.device();
         let emitter = ctx.emitter.clone();
 
         let (stop_tx, mut stop_rx) = tokio::sync::watch::channel(false);
         let task = tokio::spawn(async move {
+            // Owned by this single-threaded loop → no locking needed.
+            let mut pid_tools: PidTools = HashMap::new();
             loop {
                 tokio::select! {
                     _ = stop_rx.changed() => {
@@ -257,7 +375,14 @@ impl Module for AiUsageModule {
                         }
                     }
                     r = rx.recv() => match r {
-                        Ok(ev) => handle_event(&ev, &meta, &device, emitter.as_ref()),
+                        Ok(ev) => match ev.kind {
+                            EventKind::ProcessExec => handle_exec(&ev, &mut pid_tools),
+                            EventKind::ProcessExit => handle_exit(&ev, &mut pid_tools),
+                            EventKind::NetConnect => {
+                                handle_connect(&ev, &pid_tools, &meta, &device, emitter.as_ref())
+                            }
+                            _ => {}
+                        },
                         Err(RecvError::Lagged(_)) => continue, // dropped events; keep reading
                         Err(RecvError::Closed) => break,        // bus gone; exit
                     },
@@ -376,10 +501,145 @@ mod tests {
         }
     }
 
+    fn exec(fields: serde_json::Value) -> SubstrateEvent {
+        SubstrateEvent {
+            kind: EventKind::ProcessExec,
+            ts: 0,
+            fields,
+        }
+    }
+
+    fn exit(pid: u64) -> SubstrateEvent {
+        SubstrateEvent {
+            kind: EventKind::ProcessExit,
+            ts: 0,
+            fields: serde_json::json!({ "pid": pid }),
+        }
+    }
+
+    /// Connect with no prior exec state (the direct-comm path).
+    fn handle_connect_nostate(
+        ev: &SubstrateEvent,
+        meta: &Metadata,
+        device: &Device,
+        emitter: &dyn OcsfEmitter,
+    ) {
+        handle_connect(ev, &PidTools::new(), meta, device, emitter);
+    }
+
+    // ---- interpreter / cmdline attribution ----
+
+    #[test]
+    fn cmdline_and_interpreter_helpers() {
+        assert!(is_interpreter("python3") && is_interpreter("/usr/bin/node"));
+        assert!(!is_interpreter("aider") && !is_interpreter("cursor"));
+        // Basename strips known script exts so a script path resolves to its name.
+        assert_eq!(match_tool("/usr/local/bin/aider.py"), Some("aider"));
+        assert_eq!(
+            match_tool_in_cmdline("/usr/bin/python3 /usr/local/bin/aider --model gpt-4"),
+            Some("aider")
+        );
+        assert_eq!(
+            match_tool_in_cmdline("node /opt/tools/claude/bin/claude.js chat"),
+            Some("claude-code")
+        );
+        // A plain interpreter session (no AI script) → no match.
+        assert_eq!(match_tool_in_cmdline("python3 -c print(1)"), None);
+        assert_eq!(match_tool_in_cmdline("node /srv/app/server.js"), None);
+    }
+
+    #[test]
+    fn attributes_interpreter_hosted_tool_via_cmdline() {
+        // aider running as python3: exec records the cmdline; the later connect
+        // (comm == python3) is attributed to aider via the pid map.
+        let mut pids = PidTools::new();
+        handle_exec(
+            &exec(serde_json::json!({
+                "pid": 700, "image": "/usr/bin/python3",
+                "cmdline": "/usr/bin/python3 /usr/local/bin/aider --model gpt-4"
+            })),
+            &mut pids,
+        );
+        let em = CapturingEmitter::default();
+        handle_connect(
+            &connect(serde_json::json!({
+                "pid": 700, "image": "python3", "daddr": "203.0.113.5", "dport": 443
+            })),
+            &pids,
+            &meta(),
+            &device(),
+            &em,
+        );
+        let out = em.emitted.lock().unwrap();
+        assert_eq!(out.len(), 1, "interpreter-hosted aider must be attributed");
+        assert_eq!(out[0].data["tool"], "aider");
+        assert_eq!(out[0].data["via"], "cmdline");
+        assert_eq!(out[0].data["kind"], "ai_tool_egress");
+    }
+
+    #[test]
+    fn interpreter_connect_without_matching_exec_is_dropped() {
+        // A bare python3/node connect we never saw exec an AI tool → not ours.
+        let em = CapturingEmitter::default();
+        handle_connect(
+            &connect(serde_json::json!({
+                "pid": 701, "image": "python3", "daddr": "203.0.113.5", "dport": 443
+            })),
+            &PidTools::new(),
+            &meta(),
+            &device(),
+            &em,
+        );
+        assert!(em.emitted.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn exit_and_pid_reuse_clear_attribution() {
+        let mut pids = PidTools::new();
+        let aider_exec = exec(serde_json::json!({
+            "pid": 42, "image": "python3",
+            "cmdline": "python3 /usr/local/bin/aider"
+        }));
+        // Track, then exit → forgotten.
+        handle_exec(&aider_exec, &mut pids);
+        assert!(pids.contains_key(&42));
+        handle_exit(&exit(42), &mut pids);
+        assert!(!pids.contains_key(&42));
+
+        // Track again, then the SAME pid re-execs a non-AI interpreter session →
+        // the stale aider attribution must be cleared (pid-reuse safety).
+        handle_exec(&aider_exec, &mut pids);
+        handle_exec(
+            &exec(
+                serde_json::json!({ "pid": 42, "image": "python3", "cmdline": "python3 manage.py" }),
+            ),
+            &mut pids,
+        );
+        assert!(!pids.contains_key(&42), "reused pid must not keep aider");
+    }
+
+    #[test]
+    fn direct_comm_match_still_wins_without_state() {
+        // The direct path is unchanged: a real aider binary connect needs no map.
+        let em = CapturingEmitter::default();
+        handle_connect_nostate(
+            &connect(serde_json::json!({
+                "pid": 9, "image": "aider", "daddr": "203.0.113.5", "dport": 443
+            })),
+            &meta(),
+            &device(),
+            &em,
+        );
+        let out = em.emitted.lock().unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].data["via"], "comm");
+        assert_eq!(out[0].data["tool"], "aider");
+    }
+
     #[test]
     fn emits_for_ai_tool_external_egress() {
         let em = CapturingEmitter::default();
-        handle_event(
+        handle_connect_nostate(
             &connect(serde_json::json!({
                 "pid": 4242, "image": "/usr/local/bin/cursor",
                 "daddr": "203.0.113.10", "dport": 443, "proto": "tcp"
@@ -410,7 +670,7 @@ mod tests {
         // over IPv6. v1 missed this on BOTH counts (.exe suffix + IPv6 external);
         // this pins the fix.
         let em = CapturingEmitter::default();
-        handle_event(
+        handle_connect_nostate(
             &connect(serde_json::json!({
                 "pid": 18536,
                 "image": r"C:\Users\pkkar\AppData\Roaming\npm\node_modules\@anthropic-ai\claude-code\bin\claude.exe",
@@ -434,7 +694,7 @@ mod tests {
         // aidiscovery to say "cursor is backed by a local model runtime".
         for lo in ["127.0.0.1", "::1"] {
             let em = CapturingEmitter::default();
-            handle_event(
+            handle_connect_nostate(
                 &connect(serde_json::json!({
                     "pid": 1, "image": "cursor", "daddr": lo, "dport": 11434, "proto": "tcp"
                 })),
@@ -463,7 +723,7 @@ mod tests {
             "fd00::1234",
         ] {
             let em = CapturingEmitter::default();
-            handle_event(
+            handle_connect_nostate(
                 &connect(serde_json::json!({
                     "pid": 1, "image": "aider", "daddr": priv_addr, "dport": 8080, "proto": "tcp"
                 })),
@@ -482,7 +742,7 @@ mod tests {
     fn skips_unparseable_destination() {
         // We never guess a scope from an address we can't parse → drop, no panic.
         let em = CapturingEmitter::default();
-        handle_event(
+        handle_connect_nostate(
             &connect(serde_json::json!({
                 "pid": 1, "image": "cursor", "daddr": "not-an-ip", "dport": 443
             })),
@@ -497,7 +757,7 @@ mod tests {
     fn skips_non_ai_process_external_egress() {
         // A normal browser egressing is netmon's business, not ours.
         let em = CapturingEmitter::default();
-        handle_event(
+        handle_connect_nostate(
             &connect(serde_json::json!({
                 "pid": 2, "image": "firefox", "daddr": "203.0.113.10", "dport": 443
             })),
@@ -512,14 +772,14 @@ mod tests {
     fn skips_malformed_and_wrong_kind() {
         let em = CapturingEmitter::default();
         // Missing daddr.
-        handle_event(
+        handle_connect_nostate(
             &connect(serde_json::json!({ "pid": 1, "image": "cursor", "dport": 443 })),
             &meta(),
             &device(),
             &em,
         );
         // Wrong kind, otherwise valid.
-        handle_event(
+        handle_connect_nostate(
             &SubstrateEvent {
                 kind: EventKind::ProcessExec,
                 ts: 0,
@@ -547,7 +807,7 @@ mod tests {
             // Read exactly the two published events, then return.
             for _ in 0..2 {
                 if let Ok(ev) = rx_ready.recv().await {
-                    handle_event(&ev, &meta, &device, emitter.as_ref());
+                    handle_connect_nostate(&ev, &meta, &device, emitter.as_ref());
                 }
             }
         });
