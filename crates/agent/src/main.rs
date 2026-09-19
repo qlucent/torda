@@ -338,6 +338,12 @@ async fn main() -> anyhow::Result<()> {
     // runtimes. On the default StubBus no events → a behavior-preserving no-op
     // until a real backend feeds the bus.
     mgr.register(Box::new(torda_mod_aiusage::AiUsageModule::new()));
+    // aimodel READS the shared snapshot's `ai_models` table (AI model weight files
+    // discovered on disk, with a code-execution risk flag for pickle formats + a
+    // change-detection fingerprint) and reports them as AI Inventory Info (9004,
+    // kind `ai_model_inventory`). Refresh-capable (ChangeGate) so post-startup
+    // integrity drift re-emits; discovery only — the backend scores it.
+    mgr.register(Box::new(torda_mod_aimodel::AiModelModule::new()));
     // corr CONSUMES ProcessExec+NetConnect and correlates them by pid; on the
     // default StubBus no events → a behavior-preserving no-op.
     mgr.register(Box::new(torda_mod_corr::CorrModule::new()));

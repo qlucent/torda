@@ -231,6 +231,7 @@ torda-mod-filemon = { path = "../modules/filemon" }
 torda-mod-libload = { path = "../modules/libload" }
 torda-mod-aidiscovery = { path = "../modules/aidiscovery" }
 torda-mod-aiusage = { path = "../modules/aiusage" }
+torda-mod-aimodel = { path = "../modules/aimodel" }
 torda-mod-corr = { path = "../modules/corr" }
 # P3c-1: the secure control service wiring (all first-party crates).
 torda-control-plane = { path = "../../server/control-plane" }
