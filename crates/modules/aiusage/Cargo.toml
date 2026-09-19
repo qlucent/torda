@@ -1,0 +1,22 @@
+[package]
+name = "torda-mod-aiusage"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[lib]
+name = "torda_mod_aiusage"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true }
+torda-core = { path = "../../core" }
+torda-ocsf = { path = "../../ocsf" }
+# Reused only for the single canonical `is_external` definition of off-box egress.
+torda-mod-netmon = { path = "../netmon" }
+
+[dev-dependencies]
+torda-substrate = { path = "../../substrate" }

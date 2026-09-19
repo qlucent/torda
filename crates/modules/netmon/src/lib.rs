@@ -91,7 +91,12 @@ fn rule_severity(rule: &str) -> u8 {
 /// that does NOT parse as an `Ipv4Addr` is NOT classified as external (returns
 /// `false`): we never guess reachability from a string we can't parse, so the
 /// external-correlated rule cannot fire on an unparseable address.
-fn is_external(daddr: &str) -> bool {
+///
+/// `pub` so other modules that need the SAME "is this off-box egress?" definition
+/// reuse it rather than re-deriving it (e.g. `torda-mod-aiusage` flags AI-tool
+/// egress only when it leaves the host). One definition of "external" keeps them
+/// from drifting apart.
+pub fn is_external(daddr: &str) -> bool {
     match daddr.parse::<Ipv4Addr>() {
         Ok(ip) => {
             let private_or_local =

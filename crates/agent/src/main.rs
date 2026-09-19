@@ -330,6 +330,12 @@ async fn main() -> anyhow::Result<()> {
     // beyond loopback, as AI Inventory Info (9004). Discovery only — the backend
     // scores/enriches it.
     mgr.register(Box::new(torda_mod_aidiscovery::AiDiscoveryModule::new()));
+    // aiusage CONSUMES NetConnect and reports AI developer-tool egress off-box
+    // (Cursor/Claude Code/aider/Copilot/… → an external model API) as AI Inventory
+    // Info (9004, kind `ai_tool_egress`). Discovery only — the backend decides
+    // whether the egress is sanctioned. On the default StubBus no events → a
+    // behavior-preserving no-op until a real backend feeds the bus.
+    mgr.register(Box::new(torda_mod_aiusage::AiUsageModule::new()));
     // corr CONSUMES ProcessExec+NetConnect and correlates them by pid; on the
     // default StubBus no events → a behavior-preserving no-op.
     mgr.register(Box::new(torda_mod_corr::CorrModule::new()));
