@@ -19,6 +19,7 @@ members = [
   "crates/modules/libload",
   "crates/modules/aidiscovery",
   "crates/modules/aiusage",
+  "crates/modules/aimodel",
   "crates/modules/corr",
   "crates/agent",
   "server/findings-engine",

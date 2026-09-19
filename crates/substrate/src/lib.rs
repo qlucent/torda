@@ -4,6 +4,7 @@
 //! and `StubSnapshot` with real OS table providers — without touching any
 //! module, because they depend only on the core traits.
 pub mod ai;
+pub mod ai_models;
 mod etw;
 pub mod files;
 pub mod listeners;
@@ -15,6 +16,7 @@ pub mod packages;
 mod ebpf;
 
 use ai::{discover_ai_runtimes, AiRuntime};
+use ai_models::{default_ai_model_provider, AiModel, AiModelProvider, EmptyAiModelProvider};
 use files::{default_file_provider, FileHashProvider, FileState};
 use listeners::{default_listener_provider, EmptyListenerProvider, Listener, ListenerProvider};
 use packages::{default_package_provider, Package, PackageProvider};
@@ -55,6 +57,7 @@ pub struct StubSnapshot {
     files: Vec<FileState>,
     listeners: Vec<Listener>,
     ai_runtimes: Vec<AiRuntime>,
+    ai_models: Vec<AiModel>,
 }
 
 impl StubSnapshot {
@@ -63,6 +66,7 @@ impl StubSnapshot {
             default_package_provider(),
             default_file_provider(),
             default_listener_provider(),
+            default_ai_model_provider(),
         )
     }
 
@@ -73,26 +77,33 @@ impl StubSnapshot {
             provider,
             default_file_provider(),
             Box::new(EmptyListenerProvider),
+            Box::new(EmptyAiModelProvider),
         )
     }
 
-    /// Builds the snapshot from the package + file providers (listeners empty).
-    /// The provider seam keeps OS access testable and lets tests inject
+    /// Builds the snapshot from the package + file providers (listeners + models
+    /// empty). The provider seam keeps OS access testable and lets tests inject
     /// deterministic package and file lists.
     pub fn with_providers(
         packages: Box<dyn PackageProvider>,
         files: Box<dyn FileHashProvider>,
     ) -> Arc<Self> {
-        Self::with_all_providers(packages, files, Box::new(EmptyListenerProvider))
+        Self::with_all_providers(
+            packages,
+            files,
+            Box::new(EmptyListenerProvider),
+            Box::new(EmptyAiModelProvider),
+        )
     }
 
-    /// Builds the snapshot from all three providers. Only `new()` wires the real
-    /// listener backend (which shells out); test constructors inject the empty
-    /// provider so no command runs.
+    /// Builds the snapshot from all providers. Only `new()` wires the real
+    /// listener + model-file backends (which touch the OS/FS); test constructors
+    /// inject the empty providers so no command runs and no filesystem is walked.
     pub fn with_all_providers(
         packages: Box<dyn PackageProvider>,
         files: Box<dyn FileHashProvider>,
         listeners: Box<dyn ListenerProvider>,
+        ai_models: Box<dyn AiModelProvider>,
     ) -> Arc<Self> {
         let hostname = read_hostname();
         let (os, os_version) = read_os_release();
@@ -108,6 +119,7 @@ impl StubSnapshot {
             files: files.files(),
             listeners,
             ai_runtimes,
+            ai_models: ai_models.models(),
         })
     }
 }
@@ -169,6 +181,20 @@ impl SnapshotProvider for StubSnapshot {
                         "exposed": r.exposed,
                         "version": r.version,
                         "models": r.models,
+                    })
+                })
+                .collect(),
+            "ai_models" => self
+                .ai_models
+                .iter()
+                .map(|m| {
+                    serde_json::json!({
+                        "path": m.path,
+                        "format": m.format,
+                        "risky": m.risky,
+                        "size": m.size,
+                        "mtime": m.mtime,
+                        "fingerprint": m.fingerprint,
                     })
                 })
                 .collect(),
