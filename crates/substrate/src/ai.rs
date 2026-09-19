@@ -54,6 +54,11 @@ pub fn match_runtime(process: Option<&str>, port: u16) -> Option<&'static str> {
             ("tabby", "Tabby"),
             ("open-webui", "Open WebUI"),
             ("openwebui", "Open WebUI"),
+            ("llamafile", "llamafile"),
+            ("litellm", "LiteLLM"),
+            ("sglang", "SGLang"),
+            ("ramalama", "RamaLama"),
+            ("jan", "Jan"),
         ];
         for (needle, name) in NAMES {
             if p.contains(needle) {
@@ -183,15 +188,17 @@ mod tests {
             listener("0.0.0.0", 8080, Some("llama-server")),
             listener("0.0.0.0", 22, Some("sshd")),
             listener("0.0.0.0", 1234, None), // LM Studio by port
+            listener("0.0.0.0", 4000, Some("litellm")), // newly catalogued runtime
         ];
         let r = classify(&ls);
-        assert_eq!(r.len(), 3);
+        assert_eq!(r.len(), 4);
         assert_eq!(r[0].runtime, "Ollama");
         assert!(!r[0].exposed);
         assert!(r[0].models.is_empty()); // classify doesn't probe
         assert_eq!(r[1].runtime, "llama.cpp");
         assert!(r[1].exposed);
         assert_eq!(r[2].runtime, "LM Studio");
+        assert_eq!(r[3].runtime, "LiteLLM");
     }
 
     #[test]
