@@ -54,10 +54,17 @@ const CATALOG: &[(&str, &str)] = &[
 ];
 
 /// The last path component of a process image, tolerating both `/` (Linux) and
-/// `\` (Windows) separators. A bare name (already a basename, or a kernel `comm`)
-/// is returned unchanged.
+/// `\` (Windows) separators, with a trailing `.exe` stripped (Windows images are
+/// `claude.exe`, not `claude`). A bare name (already a basename, or a kernel
+/// `comm`) is returned unchanged apart from the extension.
 fn basename(image: &str) -> &str {
-    image.rsplit(['/', '\\']).next().unwrap_or(image)
+    let name = image.rsplit(['/', '\\']).next().unwrap_or(image);
+    // Case-insensitive strip of a single trailing `.exe`.
+    if name.len() > 4 && name[name.len() - 4..].eq_ignore_ascii_case(".exe") {
+        &name[..name.len() - 4]
+    } else {
+        name
+    }
 }
 
 /// Classify a connecting process's image against the AI-tool [`CATALOG`],
@@ -256,13 +263,21 @@ mod tests {
     }
 
     #[test]
-    fn matches_windows_separators() {
+    fn matches_windows_separators_and_exe_suffix() {
+        // Real path observed live: this Claude Code session's own binary.
+        assert_eq!(
+            match_tool(
+                r"C:\Users\pkkar\AppData\Roaming\npm\node_modules\@anthropic-ai\claude-code\bin\claude.exe"
+            ),
+            Some("claude-code"),
+        );
         assert_eq!(
             match_tool(r"C:\Users\dev\AppData\Local\Programs\cursor\cursor.exe"),
-            None,
-            "cursor.exe != cursor — exact basename only (no extension stripping in v1)"
+            Some("cursor"),
         );
         assert_eq!(match_tool(r"C:\tools\aider"), Some("aider"));
+        // `.exe` strip is a single trailing extension, not a substring match.
+        assert_eq!(match_tool("cursor.exe.bak"), None);
     }
 
     #[test]
@@ -345,10 +360,40 @@ mod tests {
     }
 
     #[test]
+    fn emits_for_ai_tool_ipv6_egress() {
+        // The exact live scenario: this session's `claude.exe` → the Anthropic API
+        // over IPv6. v1 missed this on BOTH counts (.exe suffix + IPv6 external);
+        // this pins the fix.
+        let em = CapturingEmitter::default();
+        handle_event(
+            &connect(serde_json::json!({
+                "pid": 18536,
+                "image": r"C:\Users\pkkar\AppData\Roaming\npm\node_modules\@anthropic-ai\claude-code\bin\claude.exe",
+                "daddr": "2607:6bc0::10", "dport": 443, "proto": "tcp"
+            })),
+            &meta(),
+            &device(),
+            &em,
+        );
+        let out = em.emitted.lock().unwrap();
+        assert_eq!(out.len(), 1, "claude.exe egress over IPv6 must be reported");
+        assert_eq!(out[0].data["tool"], "claude-code");
+        assert_eq!(out[0].data["connection"]["daddr"], "2607:6bc0::10");
+    }
+
+    #[test]
     fn skips_ai_tool_to_local_runtime() {
         // Editor → loopback Ollama is local use, NOT off-box egress.
         let em = CapturingEmitter::default();
-        for local in ["127.0.0.1", "10.0.0.5", "192.168.1.9", "169.254.1.1"] {
+        for local in [
+            "127.0.0.1",
+            "10.0.0.5",
+            "192.168.1.9",
+            "169.254.1.1",
+            "::1",        // IPv6 loopback
+            "fe80::1",    // IPv6 link-local
+            "fd00::1234", // IPv6 unique-local
+        ] {
             handle_event(
                 &connect(serde_json::json!({
                     "pid": 1, "image": "cursor", "daddr": local, "dport": 11434, "proto": "tcp"
