@@ -17,7 +17,7 @@
 //! connect was attempted", and no DNS context. A benign service listening on a
 //! flagged port, or a C2 on 443, will be judged on IP-class + port alone.
 use async_trait::async_trait;
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::time::Duration;
 use tokio::sync::broadcast::error::RecvError;
 use torda_core::{EventKind, Module, ModuleCtx, ModuleHealth, ModuleId, SubstrateEvent};
@@ -84,22 +84,55 @@ fn rule_severity(rule: &str) -> u8 {
     }
 }
 
-/// Is a destination IPv4 address "external" (public) rather than private/local?
+/// Is a destination address "external" (public) rather than private/local?
+/// Handles both IPv4 and IPv6 — real API egress is frequently IPv6 (e.g. the
+/// Anthropic API from a dev box), so an IPv4-only check would silently miss it.
 ///
-/// Private/local = RFC1918 private, loopback, link-local, or unspecified
-/// (`0.0.0.0`). Everything else is treated as external/public. A destination
-/// that does NOT parse as an `Ipv4Addr` is NOT classified as external (returns
-/// `false`): we never guess reachability from a string we can't parse, so the
-/// external-correlated rule cannot fire on an unparseable address.
-fn is_external(daddr: &str) -> bool {
-    match daddr.parse::<Ipv4Addr>() {
-        Ok(ip) => {
-            let private_or_local =
-                ip.is_private() || ip.is_loopback() || ip.is_link_local() || ip.is_unspecified();
-            !private_or_local
+/// Private/local means:
+/// - IPv4: RFC1918 private, loopback, link-local, or unspecified (`0.0.0.0`).
+/// - IPv6: loopback (`::1`), unspecified (`::`), link-local (`fe80::/10`), or
+///   unique-local (`fc00::/7`). An IPv4-mapped address (`::ffff:a.b.c.d`) is
+///   judged by its embedded IPv4.
+///
+/// Everything else is external/public. A destination that does NOT parse as an
+/// `IpAddr` is NOT classified as external (returns `false`): we never guess
+/// reachability from a string we can't parse, so the external-correlated rule
+/// cannot fire on an unparseable address.
+///
+/// `pub` so other modules that need the SAME "is this off-box egress?" definition
+/// reuse it rather than re-deriving it (e.g. `torda-mod-aiusage` flags AI-tool
+/// egress only when it leaves the host). One definition of "external" keeps them
+/// from drifting apart.
+pub fn is_external(daddr: &str) -> bool {
+    match daddr.parse::<IpAddr>() {
+        Ok(IpAddr::V4(ip)) => !ipv4_is_local(&ip),
+        Ok(IpAddr::V6(ip)) => {
+            // Treat an IPv4-mapped v6 address by its embedded v4 (so `::ffff:10.0.0.1`
+            // is private, `::ffff:1.2.3.4` external — matching the v4 verdict).
+            if let Some(v4) = ip.to_ipv4_mapped() {
+                return !ipv4_is_local(&v4);
+            }
+            !ipv6_is_local(&ip)
         }
         Err(_) => false,
     }
+}
+
+fn ipv4_is_local(ip: &Ipv4Addr) -> bool {
+    ip.is_private() || ip.is_loopback() || ip.is_link_local() || ip.is_unspecified()
+}
+
+/// IPv6 "private/local": loopback, unspecified, link-local (`fe80::/10`), or
+/// unique-local (`fc00::/7`). The last two are checked on the leading segment
+/// because std's `is_unicast_link_local`/`is_unique_local` are still unstable.
+fn ipv6_is_local(ip: &Ipv6Addr) -> bool {
+    if ip.is_loopback() || ip.is_unspecified() {
+        return true;
+    }
+    let hi = ip.segments()[0];
+    let link_local = (hi & 0xffc0) == 0xfe80; // fe80::/10
+    let unique_local = (hi & 0xfe00) == 0xfc00; // fc00::/7
+    link_local || unique_local
 }
 
 /// Assess an outbound connection by destination address + port. Pure +
@@ -387,6 +420,25 @@ mod tests {
         // 169.254.x.x (link-local) and 0.0.0.0 (unspecified) are NOT external.
         assert_eq!(rules(&assess("169.254.1.1", 4444)), vec!["suspicious_port"]);
         assert_eq!(rules(&assess("0.0.0.0", 4444)), vec!["suspicious_port"]);
+    }
+
+    #[test]
+    fn is_external_handles_ipv6() {
+        // Public IPv6 (Anthropic API observed live from a dev box) → external.
+        assert!(is_external("2607:6bc0::10"));
+        assert!(is_external("2600:1901:0:9e23::"));
+        // Local IPv6 → NOT external.
+        assert!(!is_external("::1"), "loopback");
+        assert!(!is_external("::"), "unspecified");
+        assert!(!is_external("fe80::1"), "link-local /10");
+        assert!(!is_external("febf::1"), "link-local /10 upper edge");
+        assert!(!is_external("fc00::1"), "unique-local /7");
+        assert!(!is_external("fdff::1"), "unique-local /7 upper edge");
+        // IPv4-mapped v6 is judged by its embedded v4.
+        assert!(is_external("::ffff:1.2.3.4"));
+        assert!(!is_external("::ffff:10.0.0.1"));
+        // Unparseable is never external.
+        assert!(!is_external("not-an-ip"));
     }
 
     // ---------- end-to-end via StubBus + capturing emitter ----------
