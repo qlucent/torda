@@ -67,6 +67,11 @@ const CATALOG: &[(&str, &str)] = &[
     ("cline", "cline"),
     ("shell-gpt", "sgpt"),
     ("chatgpt", "chatgpt"),
+    ("codex", "codex"),   // OpenAI Codex CLI
+    ("gemini", "gemini"), // Google gemini-cli
+    ("aichat", "aichat"),
+    ("llm", "llm"), // Simon Willison's `llm` CLI
+    ("zed", "zed"),
 ];
 
 /// Generic interpreters that HOST an AI tool rather than being one: an aider or a
@@ -124,10 +129,18 @@ pub fn match_tool(image: &str) -> Option<&'static str> {
     match_name(basename(image))
 }
 
-/// Is this image a generic interpreter (so we should consult its cmdline)?
+/// Is this image a generic interpreter (so we should consult its cmdline)? Matches
+/// the [`INTERPRETERS`] list exactly, plus any VERSIONED python (`python3.12`,
+/// `python2.7`) — a very common way AI tools like aider actually run.
 fn is_interpreter(image: &str) -> bool {
     let b = basename(image);
-    INTERPRETERS.iter().any(|i| b.eq_ignore_ascii_case(i))
+    if INTERPRETERS.iter().any(|i| b.eq_ignore_ascii_case(i)) {
+        return true;
+    }
+    // `python`, `python3`, `python3.12`, `python2.7`: "python" + digits/dots only.
+    let lb = b.to_ascii_lowercase();
+    matches!(lb.strip_prefix("python"), Some(rest)
+        if rest.is_empty() || rest.chars().all(|c| c.is_ascii_digit() || c == '.'))
 }
 
 /// Attribute an AI tool from a process's cmdline: scan argv tokens (skipping the
@@ -532,7 +545,15 @@ mod tests {
     #[test]
     fn cmdline_and_interpreter_helpers() {
         assert!(is_interpreter("python3") && is_interpreter("/usr/bin/node"));
+        // Versioned python (how aider et al. commonly run) is an interpreter too.
+        assert!(is_interpreter("python3.12") && is_interpreter("/usr/bin/python3.11"));
+        assert!(is_interpreter("python2.7"));
+        assert!(!is_interpreter("python-config"), "not a bare interpreter");
         assert!(!is_interpreter("aider") && !is_interpreter("cursor"));
+        // Newly catalogued tools resolve.
+        assert_eq!(match_tool("codex"), Some("codex"));
+        assert_eq!(match_tool("/usr/local/bin/gemini"), Some("gemini"));
+        assert_eq!(match_tool("zed"), Some("zed"));
         // Basename strips known script exts so a script path resolves to its name.
         assert_eq!(match_tool("/usr/local/bin/aider.py"), Some("aider"));
         assert_eq!(
