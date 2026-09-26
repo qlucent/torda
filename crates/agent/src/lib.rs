@@ -150,6 +150,27 @@ pub struct AgentConfig {
     /// daemon mode. Example: `[refresh]\nfim = 60\nasset = 0`.
     #[serde(default)]
     pub refresh: std::collections::HashMap<String, u64>,
+    /// The `[netdiscovery]` section (OPTIONAL): active network-sweep configuration consumed
+    /// by the substrate's `network_hosts` sweep. Absent → `None`, which the agent binary maps
+    /// to an empty (no-op) `SweepConfig` — the substrate sweeps nothing.
+    #[serde(default)]
+    pub netdiscovery: Option<NetDiscoveryConfig>,
+}
+
+/// The `[netdiscovery]` section: the CIDRs/ports/rate the substrate's active sweep is
+/// configured with. An empty `ports` list is filled in by the agent binary's mapper with a
+/// sensible top-N default — this struct only carries what was parsed.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, Default)]
+pub struct NetDiscoveryConfig {
+    /// CIDR ranges to sweep, e.g. `["10.0.0.0/24"]`. Empty → nothing to sweep.
+    #[serde(default)]
+    pub cidrs: Vec<String>,
+    /// TCP ports to probe per host. Empty → the agent binary's default port set.
+    #[serde(default)]
+    pub ports: Vec<u16>,
+    /// Sweep rate in packets/probes per second.
+    #[serde(default)]
+    pub rate_pps: u32,
 }
 
 /// The `[agent]` section: agent-wide run-mode settings.
@@ -593,6 +614,11 @@ mod config_tests {
                 },
             }),
             refresh: std::collections::HashMap::from([("fim".to_string(), 60u64)]),
+            netdiscovery: Some(NetDiscoveryConfig {
+                cidrs: vec!["10.0.0.0/24".to_string()],
+                ports: vec![22, 443],
+                rate_pps: 500,
+            }),
         }
     }
 
@@ -679,6 +705,37 @@ key = "/t/server.key"
         assert_eq!(control.control_addr, "127.0.0.1:0");
         assert_eq!(control.roles.len(), 1);
         assert_eq!(control.cert.ca_paths, vec![PathBuf::from("/t/ca.pem")]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn netdiscovery_section_parses_cidrs_ports_and_rate() {
+        let dir = temp_dir("netdiscovery");
+        let path = dir.join("agent.toml");
+        std::fs::write(
+            &path,
+            "[netdiscovery]\ncidrs = [\"10.0.0.0/24\"]\nports = [22, 443]\nrate_pps = 500\n",
+        )
+        .unwrap();
+        let cfg = load_config(&path).expect("[netdiscovery] config loads");
+        assert_eq!(
+            cfg.netdiscovery,
+            Some(NetDiscoveryConfig {
+                cidrs: vec!["10.0.0.0/24".to_string()],
+                ports: vec![22, 443],
+                rate_pps: 500,
+            })
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn no_netdiscovery_section_yields_none() {
+        let dir = temp_dir("no-netdiscovery");
+        let path = dir.join("agent.toml");
+        std::fs::write(&path, "[agent]\ndaemon = true\n").unwrap();
+        let cfg = load_config(&path).expect("config without [netdiscovery] loads");
+        assert_eq!(cfg.netdiscovery, None, "no [netdiscovery] -> None (no-op)");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

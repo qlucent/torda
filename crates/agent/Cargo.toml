@@ -19,6 +19,10 @@ windows-etw = ["torda-substrate/windows-etw"]
 # the standard build never pulls aya / builds a BPF object; a non-root run fails
 # soft to the stub bus.
 linux-ebpf = ["torda-substrate/linux-ebpf"]
+# Forwards to the substrate's active network-discovery sweep (raw-socket host/port
+# probing). Off by default so a standard build never sweeps the network even if a
+# `[netdiscovery]` config section is present; the agent opts in explicitly.
+active-sweep = ["torda-substrate/active-sweep"]
 
 [lib]
 name = "torda"
@@ -233,6 +237,7 @@ torda-mod-aidiscovery = { path = "../modules/aidiscovery" }
 torda-mod-aiusage = { path = "../modules/aiusage" }
 torda-mod-aimodel = { path = "../modules/aimodel" }
 torda-mod-corr = { path = "../modules/corr" }
+torda-mod-netdiscovery = { path = "../modules/netdiscovery" }
 # P3c-1: the secure control service wiring (all first-party crates).
 torda-control-plane = { path = "../../server/control-plane" }
 torda-transport-tls = { path = "../../server/transport-tls" }
