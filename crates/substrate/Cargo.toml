@@ -21,6 +21,9 @@ linux-ebpf = ["dep:aya", "dep:torda-substrate-ebpf-common"]
 # cross-platform build never pulls ferrisetw; a non-elevated run fails soft to
 # the stub bus. `dep:ferrisetw` keeps the dependency purely feature-activated.
 windows-etw = ["dep:ferrisetw"]
+# TCP-connect network sweep engine (network_hosts.rs). Off by default so the
+# stub build never opens outbound sockets; no new dependency.
+active-sweep = []
 
 [dependencies]
 anyhow.workspace = true

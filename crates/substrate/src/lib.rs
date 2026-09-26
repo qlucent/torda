@@ -8,6 +8,7 @@ pub mod ai_models;
 mod etw;
 pub mod files;
 pub mod listeners;
+pub mod network_hosts;
 pub mod packages;
 // Linux eBPF backend: only compiled on a Linux `--features linux-ebpf` build,
 // where build.rs has produced the embedded kernel object. Task 2 fills the
