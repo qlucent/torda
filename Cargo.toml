@@ -20,6 +20,7 @@ members = [
   "crates/modules/aidiscovery",
   "crates/modules/aiusage",
   "crates/modules/aimodel",
+  "crates/modules/netdiscovery",
   "crates/modules/corr",
   "crates/agent",
   "server/findings-engine",

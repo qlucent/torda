@@ -8,6 +8,7 @@ pub mod ai_models;
 mod etw;
 pub mod files;
 pub mod listeners;
+pub mod network_hosts;
 pub mod packages;
 // Linux eBPF backend: only compiled on a Linux `--features linux-ebpf` build,
 // where build.rs has produced the embedded kernel object. Task 2 fills the
@@ -58,6 +59,7 @@ pub struct StubSnapshot {
     listeners: Vec<Listener>,
     ai_runtimes: Vec<AiRuntime>,
     ai_models: Vec<AiModel>,
+    network_hosts: Vec<network_hosts::HostResult>,
 }
 
 impl StubSnapshot {
@@ -67,6 +69,7 @@ impl StubSnapshot {
             default_file_provider(),
             default_listener_provider(),
             default_ai_model_provider(),
+            Box::new(network_hosts::EmptySweepProvider),
         )
     }
 
@@ -78,6 +81,7 @@ impl StubSnapshot {
             default_file_provider(),
             Box::new(EmptyListenerProvider),
             Box::new(EmptyAiModelProvider),
+            Box::new(network_hosts::EmptySweepProvider),
         )
     }
 
@@ -93,6 +97,7 @@ impl StubSnapshot {
             files,
             Box::new(EmptyListenerProvider),
             Box::new(EmptyAiModelProvider),
+            Box::new(network_hosts::EmptySweepProvider),
         )
     }
 
@@ -104,6 +109,7 @@ impl StubSnapshot {
         files: Box<dyn FileHashProvider>,
         listeners: Box<dyn ListenerProvider>,
         ai_models: Box<dyn AiModelProvider>,
+        sweep: Box<dyn network_hosts::NetworkSweepProvider>,
     ) -> Arc<Self> {
         let hostname = read_hostname();
         let (os, os_version) = read_os_release();
@@ -111,6 +117,7 @@ impl StubSnapshot {
         // happens here, in the substrate — the only door — never in a module).
         let listeners = listeners.listeners();
         let ai_runtimes = discover_ai_runtimes(&listeners);
+        let network_hosts = sweep.sweep();
         Arc::new(Self {
             hostname,
             os,
@@ -120,6 +127,7 @@ impl StubSnapshot {
             listeners,
             ai_runtimes,
             ai_models: ai_models.models(),
+            network_hosts,
         })
     }
 }
@@ -198,6 +206,29 @@ impl SnapshotProvider for StubSnapshot {
                     })
                 })
                 .collect(),
+            "network_hosts" => self
+                .network_hosts
+                .iter()
+                .map(|h| {
+                    serde_json::json!({
+                        "ip": h.ip,
+                        "hostname": serde_json::Value::Null,
+                        "mac": serde_json::Value::Null,
+                        "responded_via": "tcp",
+                        "ttl": serde_json::Value::Null,
+                        "open_ports": h.open_ports.iter().map(|p| serde_json::json!({
+                            "port": p,
+                            "proto": "tcp",
+                            "service": serde_json::Value::Null,
+                            "banner": serde_json::Value::Null,
+                        })).collect::<Vec<_>>(),
+                        "cert_subjects": [],
+                        "snmp_sysdescr": serde_json::Value::Null,
+                        "os_guess": serde_json::Value::Null,
+                        "last_seen": serde_json::Value::Null,
+                    })
+                })
+                .collect(),
             other => anyhow::bail!("unknown snapshot table: {other}"),
         };
         Ok(Rows(rows))
@@ -240,10 +271,22 @@ impl Substrate {
     /// `SnapshotProvider` + the `EventBus` backend (`StubBus` until a real
     /// backend feature is on).
     pub fn for_this_platform() -> Self {
-        // snapshot: reuse the EXISTING real path — `StubSnapshot::new()` already
-        // routes through `default_package_provider()` (cfg-selected real) + real
-        // `device()`. It returns `Arc<StubSnapshot>`, coerced to the trait object.
-        let snapshot: Arc<dyn SnapshotProvider> = StubSnapshot::new();
+        Self::for_this_platform_with_sweep(network_hosts::SweepConfig::default())
+    }
+
+    /// Same as [`Self::for_this_platform`], plus an active network sweep
+    /// configured from `sweep_cfg`. Uses the same real providers `new()` uses
+    /// (packages/files/listeners/ai-models); only the sweep provider varies —
+    /// `EmptySweepProvider` when no CIDRs are configured, or the `active-sweep`
+    /// feature is off, else the real `TcpSweepProvider`.
+    pub fn for_this_platform_with_sweep(sweep_cfg: network_hosts::SweepConfig) -> Self {
+        let snapshot: Arc<dyn SnapshotProvider> = StubSnapshot::with_all_providers(
+            default_package_provider(),
+            default_file_provider(),
+            default_listener_provider(),
+            default_ai_model_provider(),
+            sweep_provider_for(sweep_cfg),
+        );
         // event bus: real backend selected by feature when available, else the
         // stub. `bus_label` records which one actually started.
         let (bus, bus_label) = select_event_bus();
@@ -252,6 +295,26 @@ impl Substrate {
             snapshot,
             bus_label,
         }
+    }
+}
+
+/// Picks the sweep provider for `cfg`: no-op unless CIDRs are configured AND
+/// the `active-sweep` feature is compiled in (sweeping is opt-in and
+/// feature-gated — the default build never touches the network).
+fn sweep_provider_for(
+    cfg: network_hosts::SweepConfig,
+) -> Box<dyn network_hosts::NetworkSweepProvider> {
+    if cfg.cidrs.is_empty() {
+        return Box::new(network_hosts::EmptySweepProvider);
+    }
+    #[cfg(feature = "active-sweep")]
+    {
+        Box::new(network_hosts::TcpSweepProvider::new(cfg))
+    }
+    #[cfg(not(feature = "active-sweep"))]
+    {
+        let _ = cfg;
+        Box::new(network_hosts::EmptySweepProvider)
     }
 }
 
@@ -514,6 +577,32 @@ mod tests {
         assert_eq!(ev.kind, EventKind::ProcessExit);
         assert_eq!(ev.ts, 7);
         assert_eq!(ev.fields["pid"], 42);
+    }
+
+    #[test]
+    fn snapshot_serves_network_hosts_table() {
+        struct FakeSweepProvider;
+        impl network_hosts::NetworkSweepProvider for FakeSweepProvider {
+            fn sweep(&self) -> Vec<network_hosts::HostResult> {
+                vec![network_hosts::HostResult {
+                    ip: "10.0.0.5".into(),
+                    open_ports: vec![5432],
+                }]
+            }
+        }
+
+        let s = StubSnapshot::with_all_providers(
+            Box::new(EmptyProvider),
+            Box::new(crate::files::EmptyFileProvider),
+            Box::new(EmptyListenerProvider),
+            Box::new(EmptyAiModelProvider),
+            Box::new(FakeSweepProvider),
+        );
+        let rows = s.query("network_hosts").unwrap().0;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["ip"], "10.0.0.5");
+        assert_eq!(rows[0]["open_ports"][0]["port"], 5432);
+        assert_eq!(rows[0]["responded_via"], "tcp");
     }
 
     #[test]

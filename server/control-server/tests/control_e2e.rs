@@ -143,6 +143,7 @@ fn write_config(
             enabled: true,
         }),
         refresh: Default::default(),
+        netdiscovery: None,
     };
 
     // Round-trip through the REAL loader: serialize to TOML, then `load_config` it back.

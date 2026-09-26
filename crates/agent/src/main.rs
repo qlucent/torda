@@ -27,7 +27,10 @@ use std::time::Duration;
 
 use emit::FileEmitter;
 use sampler::SysinfoSampler;
-use torda::{load_config, spawn_control_service, AgentConfig, ControlConfig, OutputConfig};
+use torda::{
+    load_config, spawn_control_service, AgentConfig, ControlConfig, NetDiscoveryConfig,
+    OutputConfig,
+};
 use torda_core::{
     ModuleCtx, ModuleManager, OcsfEmitter, ResourceBudget, ResourceGovernor, ThrottleDecision,
 };
@@ -42,6 +45,33 @@ impl OcsfEmitter for StdoutEmitter {
             Ok(line) => println!("{line}"),
             Err(e) => eprintln!("emit serialize error: {e}"),
         }
+    }
+}
+
+/// Top-N default TCP ports probed by the netdiscovery active sweep when a `[netdiscovery]`
+/// section is present but `ports` is empty. Common admin/db/IoT-management ports, not an
+/// exhaustive scan.
+const DEFAULT_PORTS: &[u16] = &[
+    22, 80, 443, 3389, 3306, 5432, 161, 23, 8080, 8443, 445, 139, 25, 53, 1433, 27017, 6379, 9100,
+    623, 1900,
+];
+
+/// Map the config's optional `[netdiscovery]` section to the substrate's `SweepConfig`.
+/// `None` (no section) -> `SweepConfig::default()`, an empty/no-op sweep. `Some` fills in
+/// [`DEFAULT_PORTS`] when the config's `ports` list is empty, so a `cidrs`-only section still
+/// probes a sensible port set.
+fn sweep_config(nd: Option<&NetDiscoveryConfig>) -> torda_substrate::network_hosts::SweepConfig {
+    match nd {
+        None => torda_substrate::network_hosts::SweepConfig::default(),
+        Some(nd) => torda_substrate::network_hosts::SweepConfig {
+            cidrs: nd.cidrs.clone(),
+            ports: if nd.ports.is_empty() {
+                DEFAULT_PORTS.to_vec()
+            } else {
+                nd.ports.clone()
+            },
+            rate_pps: nd.rate_pps,
+        },
     }
 }
 
@@ -228,7 +258,9 @@ async fn main() -> anyhow::Result<()> {
     // Windows registry uninstall keys); the event bus is still the stub until a
     // real kernel-event backend feature is on. Modules depend only on the traits,
     // so this swap changes no collection behavior.
-    let substrate = torda_substrate::Substrate::for_this_platform();
+    let substrate = torda_substrate::Substrate::for_this_platform_with_sweep(sweep_config(
+        config.as_ref().and_then(|c| c.netdiscovery.as_ref()),
+    ));
     let bus_label = substrate.bus_label;
     let bus = substrate.bus;
     let snapshot = substrate.snapshot;
@@ -347,6 +379,11 @@ async fn main() -> anyhow::Result<()> {
     // corr CONSUMES ProcessExec+NetConnect and correlates them by pid; on the
     // default StubBus no events → a behavior-preserving no-op.
     mgr.register(Box::new(torda_mod_corr::CorrModule::new()));
+    // netdiscovery READS the shared substrate's swept-host table (populated only when a
+    // `[netdiscovery]` config section is present and the `active-sweep` feature is on) and
+    // reports discovered hosts as Device Inventory Info. On the default empty/no-op sweep
+    // config the table is empty, so this stays silent — a behavior-preserving no-op.
+    mgr.register(Box::new(torda_mod_netdiscovery::NetDiscoveryModule::new()));
 
     mgr.init_all().await?;
     // P0-3: apply per-module periodic-refresh intervals from the `[refresh]`
