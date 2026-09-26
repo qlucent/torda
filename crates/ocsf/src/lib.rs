@@ -17,6 +17,7 @@ pub mod class {
     pub const CORRELATED_ACTIVITY: u32 = 9002; // custom extension: cross-sensor correlation
     pub const RUNTIME_MODULE_LOAD: u32 = 9003; // custom extension: a shared library was loaded at runtime (reachability telemetry)
     pub const AI_INVENTORY_INFO: u32 = 9004; // custom extension: AI runtimes/servers discovered on the host (local-LLM inventory)
+    pub const NETWORK_HOST_INVENTORY: u32 = 9005; // custom extension: hosts discovered by an active network sweep (agentless network inventory)
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -157,6 +158,7 @@ mod conformance {
             class::CORRELATED_ACTIVITY,
             class::RUNTIME_MODULE_LOAD,
             class::AI_INVENTORY_INFO,
+            class::NETWORK_HOST_INVENTORY,
         ] {
             assert!(
                 (9001..=9999).contains(&ext),
