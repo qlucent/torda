@@ -29,6 +29,7 @@ pub struct NetDiscoveryModule {
     ctx: Option<ModuleCtx>,
     gate: ChangeGate,
     interval: Option<Duration>,
+    scope_cidrs: Vec<String>,
 }
 
 impl Default for NetDiscoveryModule {
@@ -37,6 +38,7 @@ impl Default for NetDiscoveryModule {
             ctx: None,
             gate: ChangeGate::new(),
             interval: Some(DEFAULT_NETDISCOVERY_INTERVAL),
+            scope_cidrs: Vec::new(),
         }
     }
 }
@@ -44,6 +46,16 @@ impl Default for NetDiscoveryModule {
 impl NetDiscoveryModule {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Build the module scoped to the configured sweep ranges, stamped onto every
+    /// emitted inventory's `swept_cidrs` so the backend can attribute a collector
+    /// to the ranges it actually swept.
+    pub fn with_scope(scope_cidrs: Vec<String>) -> Self {
+        Self {
+            scope_cidrs,
+            ..Self::default()
+        }
     }
 
     /// Query the `network_hosts` table and emit the inventory, gated so an
@@ -61,6 +73,8 @@ impl NetDiscoveryModule {
             return;
         }
         let data = serde_json::json!({
+            "role": "network-scanner",
+            "swept_cidrs": self.scope_cidrs,
             "host_count": hosts.len(),
             "hosts": hosts,
         });
@@ -208,6 +222,23 @@ mod tests {
         assert_eq!(out[0].class_uid, class::NETWORK_HOST_INVENTORY);
         assert_eq!(out[0].data["host_count"], 2);
         assert_eq!(out[0].data["hosts"].as_array().unwrap().len(), 2);
+        assert_eq!(out[0].data["role"], "network-scanner");
+    }
+
+    #[tokio::test]
+    async fn emits_configured_swept_cidrs() {
+        let rows = Arc::new(Mutex::new(vec![host("10.0.0.5", 5432, "tcp")]));
+        let em = Arc::new(CapturingEmitter::default());
+        let mut m = NetDiscoveryModule::with_scope(vec!["10.0.0.0/24".into()]);
+        m.init(ctx_with(rows, em.clone())).await.unwrap();
+        m.start().await.unwrap();
+
+        let out = em.emitted.lock().unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(
+            out[0].data["swept_cidrs"],
+            serde_json::json!(["10.0.0.0/24"])
+        );
     }
 
     #[tokio::test]

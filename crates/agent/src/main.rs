@@ -383,7 +383,15 @@ async fn main() -> anyhow::Result<()> {
     // `[netdiscovery]` config section is present and the `active-sweep` feature is on) and
     // reports discovered hosts as Device Inventory Info. On the default empty/no-op sweep
     // config the table is empty, so this stays silent — a behavior-preserving no-op.
-    mgr.register(Box::new(torda_mod_netdiscovery::NetDiscoveryModule::new()));
+    mgr.register(Box::new(
+        torda_mod_netdiscovery::NetDiscoveryModule::with_scope(
+            config
+                .as_ref()
+                .and_then(|c| c.netdiscovery.as_ref())
+                .map(|nd| nd.cidrs.clone())
+                .unwrap_or_default(),
+        ),
+    ));
 
     mgr.init_all().await?;
     // P0-3: apply per-module periodic-refresh intervals from the `[refresh]`
