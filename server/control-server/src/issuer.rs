@@ -131,10 +131,9 @@ impl ControlPlaneClient {
 
 /// Derive a deterministic control-session id for `(peer, nonce)`.
 ///
-/// STUB — deliberately deterministic and network-free. The real handshake binds the session id
-/// to the mTLS peer certificate and a per-connection nonce so a session cannot be spoofed or
-/// reused across connections (see [`crate::connect`] /
-/// [`torda_transport_tls::session_from_cert`]). This gives tests and the in-memory transport a
+/// STUB — deliberately deterministic and network-free. The real handshake derives a fresh
+/// session id from authenticated TLS exporter material (see [`crate::connect`]).
+/// This gives tests and the in-memory transport a
 /// stable, reproducible session id with no clock, randomness, or network involved.
 pub fn establish_session(peer: &str, nonce: u64) -> String {
     format!("sess-{peer}-{nonce}")

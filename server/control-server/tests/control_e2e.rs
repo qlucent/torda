@@ -90,8 +90,8 @@ fn draft_cmd(actor: &str, session: &str, seq: u64) -> ControlCommand {
 /// `[control]` section `spawn_control_service` consumes): a test PKI (server chain/key + a
 /// client-auth CA), an ed25519 trust dir holding the operator's PUBLIC key, and the agent's
 /// OWN private signing key at `agent-1.key`. Returns `(control, CertFilePaths, client_leaf,
-/// agent_actor)` so the caller can build a matching client (the client leaf DER is needed for
-/// cert-bound session derivation).
+/// agent_actor)` so the caller can build a matching client (the client leaf DER is retained for
+/// connect API compatibility).
 fn write_config(
     dir: &Path,
 ) -> (
@@ -157,7 +157,7 @@ fn write_config(
 }
 
 /// Connect an mTLS client to `addr` using the client cert/key in `paths` (trusting the CA
-/// as the server root). Returns the connected transport + the cert-bound session id.
+/// as the server root). Returns the connected transport + the TLS-exported session id.
 fn connect_client(
     addr: std::net::SocketAddr,
     paths: &CertFilePaths,

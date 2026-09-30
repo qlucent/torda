@@ -13,9 +13,8 @@
 //! Because the configs from this crate require mutual certificate authentication, an
 //! untrusted or absent peer certificate makes the handshake fail and the constructor returns
 //! an [`io::Error`] — *no application frame is ever exchanged with an unauthenticated peer*.
-//! The session id is derived from the authenticated client identity (see
-//! [`session_from_cert`]). The ISSUER-side counterpart (`connect` + the client carrier) lives
-//! in the FSL `torda-control-server` crate and derives the SAME cert-bound id.
+//! Both peers derive the same fresh session id from TLS exporter material after mTLS.
+//! The ISSUER-side counterpart lives in the FSL `torda-control-server` crate.
 //!
 //! ## Fallibility
 //!
@@ -28,7 +27,6 @@ use std::io::{self, Read, Write};
 use std::net::TcpStream;
 use std::sync::Arc;
 
-use rustls::pki_types::CertificateDer;
 use rustls::{ServerConfig, ServerConnection, StreamOwned};
 
 use torda_transport::{decode_frame, encode_frame, Transport};
@@ -46,39 +44,17 @@ where
     io::Error::other(e)
 }
 
-/// Derive the control-**session** id from an authenticated peer leaf certificate's DER.
-///
-/// The id is the first 16 hex chars of `SHA-256(leaf_cert_DER)`. It is computed with
-/// the audited `ring` SHA-256 (the same crypto provider rustls uses) — never a
-/// hand-rolled hash. Because both ends hash the SAME client leaf certificate (the agent
-/// hashes the client cert it received in [`accept`]; the issuer hashes the client cert
-/// it presented in [`connect`]), both independently derive an identical id, binding the
-/// session to the cryptographically authenticated CLIENT identity.
-///
-/// A per-connection nonce (to make the id unique across reconnects of the same identity)
-/// is a deliberate future refinement; this slice uses a single connection per session,
-/// so the cert-bound id is sufficient and fully deterministic for testing.
-pub fn session_from_cert(der: &[u8]) -> String {
-    let digest = ring::digest::digest(&ring::digest::SHA256, der);
-    let mut hex = String::with_capacity(16);
-    for byte in digest.as_ref().iter().take(8) {
-        hex.push_str(&format!("{byte:02x}"));
+/// Domain separation for the control session TLS exporter. Shared by both peers.
+pub const CONTROL_SESSION_EXPORTER_LABEL: &[u8] = b"EXPORTER-torda-control-session-v1";
+
+/// Encode all 32 exported bytes as a 64-character session id.
+pub fn session_from_exported_bytes(material: [u8; 32]) -> String {
+    let mut hex = String::with_capacity(64);
+    for byte in material {
+        use std::fmt::Write as _;
+        write!(&mut hex, "{byte:02x}").expect("writing to String cannot fail");
     }
     hex
-}
-
-/// Derive the session id from a peer certificate chain, failing (never panicking) if the
-/// authenticated chain is somehow absent or empty.
-fn session_from_chain(chain: Option<&[CertificateDer<'static>]>) -> io::Result<String> {
-    let leaf = chain
-        .and_then(<[CertificateDer<'static>]>::first)
-        .ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                "no authenticated peer leaf certificate after the handshake",
-            )
-        })?;
-    Ok(session_from_cert(leaf.as_ref()))
 }
 
 /// Length-frame `frame` and write it to a TLS stream, flushing so the peer sees it as one
@@ -132,7 +108,7 @@ impl Transport for TlsServerTransport {
 
 /// **Agent side.** Take an accepted `TcpStream`, complete the mutual-TLS handshake with
 /// `cfg` (which REQUIRES a CA-signed client cert), and return the carrier plus the
-/// session id derived from the authenticated client certificate.
+/// session id derived from this authenticated TLS connection.
 ///
 /// The handshake is driven to completion HERE, before any application frame is read, so
 /// an untrusted or absent client certificate is rejected by rustls' client-cert verifier
@@ -148,8 +124,20 @@ pub fn accept(
     while conn.is_handshaking() {
         conn.complete_io(&mut stream)?;
     }
-    // The authenticated client leaf is now available; bind the session id to it.
-    let session = session_from_chain(conn.peer_certificates())?;
+    // Enforce client authentication even when a caller supplies a permissive config.
+    if conn
+        .peer_certificates()
+        .is_none_or(|chain| chain.is_empty())
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "control transport requires an authenticated client certificate",
+        ));
+    }
+    let material = conn
+        .export_keying_material([0u8; 32], CONTROL_SESSION_EXPORTER_LABEL, None)
+        .map_err(to_io)?;
+    let session = session_from_exported_bytes(material);
     let stream = StreamOwned::new(conn, stream);
     Ok((
         TlsServerTransport {
@@ -158,36 +146,4 @@ pub fn accept(
         },
         session,
     ))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn session_from_cert_is_16_hex_chars_and_stable() {
-        let s1 = session_from_cert(b"some-cert-der-bytes");
-        let s2 = session_from_cert(b"some-cert-der-bytes");
-        assert_eq!(s1, s2, "same DER hashes to the same session id");
-        assert_eq!(
-            s1.len(),
-            16,
-            "session id is 16 hex chars (first 8 SHA-256 bytes)"
-        );
-        assert!(
-            s1.chars().all(|c| c.is_ascii_hexdigit()),
-            "session id is hex"
-        );
-    }
-
-    #[test]
-    fn different_certs_yield_different_sessions() {
-        assert_ne!(session_from_cert(b"cert-A"), session_from_cert(b"cert-B"));
-    }
-
-    #[test]
-    fn empty_peer_chain_errors_not_panics() {
-        assert!(session_from_chain(None).is_err());
-        assert!(session_from_chain(Some(&[])).is_err());
-    }
 }

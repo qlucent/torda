@@ -9,9 +9,8 @@
 //! [`connect`] completes the TLS handshake (verifying the server cert against the trusted CA
 //! and presenting the client cert) **before** returning a transport, so a server cert that
 //! does not chain to the trusted CA surfaces as an [`io::Error`] with no application frame
-//! exchanged. The session id is bound to the client's OWN leaf via
-//! [`torda_transport_tls::session_from_cert`] — identical to what the agent derives from the
-//! client leaf it received, so both ends independently agree.
+//! exchanged. Both peers derive the same fresh session id from TLS exporter material
+//! after the authenticated handshake.
 //!
 //! [`client_config_from_files`] builds the mutual-TLS [`ClientConfig`] from ops-provisioned
 //! files, reusing `torda_transport_tls`'s audited, fail-closed, size-capped cert/key loaders.
@@ -29,7 +28,8 @@ use rustls::{ClientConfig, ClientConnection, StreamOwned};
 
 use torda_transport::{decode_frame, encode_frame, Transport};
 use torda_transport_tls::{
-    load_certs, load_private_key, load_root_store, read_capped_cert_file, session_from_cert,
+    load_certs, load_private_key, load_root_store, read_capped_cert_file,
+    session_from_exported_bytes, CONTROL_SESSION_EXPORTER_LABEL,
 };
 
 /// Size of the scratch buffer used to pull ciphertext-decrypted bytes off the TLS stream one
@@ -80,24 +80,18 @@ impl Transport for TlsClientTransport {
 
 /// **Issuer side.** Take a connected `TcpStream`, complete the mutual-TLS handshake with `cfg`
 /// (verifying the server cert against the trusted CA and presenting the client cert), and
-/// return the carrier plus the session id derived from `client_leaf` — the client's OWN leaf
-/// certificate, hashed identically to the way the agent's `accept` hashes the copy it received,
-/// so both ends agree on the session id.
+/// return the carrier plus the session id derived from this authenticated TLS connection.
 ///
 /// The handshake is driven to completion HERE: a server cert that does not chain to the trusted
 /// CA fails verification and surfaces as an `Err` before any application frame.
+/// The `client_leaf` argument is retained for source compatibility; session derivation uses
+/// the authenticated TLS exporter and ignores this argument.
 ///
-/// ## Why `client_leaf` is passed explicitly
-///
-/// rustls does not expose the client certificate a `ClientConfig`/`ClientConnection` presents,
-/// so — to compute the same cert-bound session id the agent derives from the received client
-/// leaf — the caller passes that leaf explicitly. This keeps session derivation bound to the
-/// authenticated CLIENT identity without hand-reaching into rustls internals.
 pub fn connect(
     mut stream: TcpStream,
     cfg: Arc<ClientConfig>,
     server_name: ServerName<'static>,
-    client_leaf: &CertificateDer<'_>,
+    _client_leaf: &CertificateDer<'_>,
 ) -> io::Result<(TlsClientTransport, String)> {
     let mut conn = ClientConnection::new(cfg, server_name).map_err(to_io)?;
     // Complete the handshake explicitly. A server cert that does not chain to the trusted CA
@@ -105,9 +99,10 @@ pub fn connect(
     while conn.is_handshaking() {
         conn.complete_io(&mut stream)?;
     }
-    // Bind the session id to the client's OWN leaf — identical to what the agent computes from
-    // the client leaf it received, so both ends independently agree.
-    let session = session_from_cert(client_leaf.as_ref());
+    let material = conn
+        .export_keying_material([0u8; 32], CONTROL_SESSION_EXPORTER_LABEL, None)
+        .map_err(to_io)?;
+    let session = session_from_exported_bytes(material);
     let stream = StreamOwned::new(conn, stream);
     Ok((
         TlsClientTransport {

@@ -55,7 +55,9 @@ pub use certs::{
     write_pki_to_der, write_pki_to_pem, CertFilePaths, MAX_CERT_FILE_BYTES,
 };
 pub use reload::{CertFileSpec, ReloadableServerConfig};
-pub use stream::{accept, session_from_cert, TlsServerTransport};
+pub use stream::{
+    accept, session_from_exported_bytes, TlsServerTransport, CONTROL_SESSION_EXPORTER_LABEL,
+};
 
 use rustls::pki_types::{
     CertificateDer, CertificateRevocationListDer, PrivateKeyDer, PrivatePkcs8KeyDer,

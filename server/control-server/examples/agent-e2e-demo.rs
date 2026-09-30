@@ -131,7 +131,7 @@ fn draft_cmd(actor: &str, session: &str, seq: u64) -> ControlCommand {
 
 /// Write a full agent-config setup to disk and return the loaded [`ControlConfig`] (the
 /// `[control]` section `spawn_control_service` consumes) plus the mTLS file paths and the
-/// client leaf DER (needed for cert-bound session derivation).
+/// client leaf DER (retained for connect API compatibility).
 ///
 /// Provisions: a test PKI (server chain/key + a client-auth CA), an ed25519 signing-key
 /// trust dir holding alice's PUBLIC key, and the agent's OWN private key at `agent-1.key`.
@@ -198,7 +198,7 @@ fn write_config(
 }
 
 /// Connect an mTLS client to `addr` using `paths`' client cert/key (trusting the CA as the
-/// server root). Returns the connected transport + the cert-bound session id.
+/// server root). Returns the connected transport + the TLS-exported session id.
 fn connect_client(
     addr: std::net::SocketAddr,
     paths: &CertFilePaths,
@@ -327,7 +327,7 @@ fn main() {
     );
     assert_eq!(
         r.session, session,
-        "the signed result echoes the cert-bound session"
+        "the signed result echoes the TLS-exported session"
     );
     println!(
         "    alice (Operator) Draft over real mTLS -> {:?}  <- agent drafted it on its OWN loop",
