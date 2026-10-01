@@ -181,6 +181,7 @@ fn write_config(
                 actor: "alice".into(),
                 role: "operator".into(),
             }],
+            apply: None,
             enabled: true,
         }),
         refresh: Default::default(),

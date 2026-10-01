@@ -140,6 +140,7 @@ fn write_config(
                 actor: "operator".into(),
                 role: "operator".into(),
             }],
+            apply: None,
             enabled: true,
         }),
         refresh: Default::default(),

@@ -41,7 +41,7 @@ use serde::{Deserialize, Serialize};
 use torda_control_plane::{
     AgentControlHandler, AgentControlLoop, CommandSigner, Ed25519Verifier, ReloadableVerifier,
 };
-use torda_remediation::action::RemediationAction;
+use torda_remediation::action::{Method, RemediationAction};
 use torda_remediation::audit::VecAuditSink;
 use torda_remediation::bridge::{Bridge, Executor, Verifier, VerifyOutcome};
 use torda_remediation::control::{Role, RolePolicy, SystemClock};
@@ -201,6 +201,29 @@ fn default_sink() -> String {
     "stdout".to_string()
 }
 
+/// Opt-in real-apply configuration. ABSENT or `enabled=false` keeps the agent on the
+/// safe dry-run executor. `allowed_methods` is an allow-list; a method not listed is
+/// refused before any process is spawned.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApplyConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub allowed_methods: Vec<Method>,
+    #[serde(default = "default_exec_timeout_secs")]
+    pub exec_timeout_secs: u64,
+    #[serde(default = "default_max_output_bytes")]
+    pub max_output_bytes: usize,
+}
+
+fn default_exec_timeout_secs() -> u64 {
+    300
+}
+
+fn default_max_output_bytes() -> usize {
+    65536
+}
+
 /// The `[control]` section: the ops-provisioned mutual-TLS remediation control channel.
 /// Holds the EXACT fields the control service was configured with before this slice; only
 /// the container changed (a nested TOML section instead of the flat JSON root). The mTLS /
@@ -227,6 +250,9 @@ pub struct ControlConfig {
     /// Actor -> role assignments for the command authorization policy.
     #[serde(default)]
     pub roles: Vec<RoleEntry>,
+    /// Opt-in real-apply config. Absent (the default) keeps the dry-run executor.
+    #[serde(default)]
+    pub apply: Option<ApplyConfig>,
     /// Ops-provisioned mutual-TLS material for the control listener.
     pub cert: CertPaths,
 }
@@ -606,6 +632,7 @@ mod config_tests {
                     actor: "operator".to_string(),
                     role: "operator".to_string(),
                 }],
+                apply: None,
                 cert: CertPaths {
                     ca_paths: vec![PathBuf::from("/etc/torda/ca.pem")],
                     cert_chain: PathBuf::from("/etc/torda/server.pem"),
@@ -801,5 +828,36 @@ key = "/t/server.key"
             "missing config surfaces NotFound"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn apply_config_absent_is_none_and_present_fills_defaults() {
+        // absent -> None (via #[serde(default)] on ControlConfig.apply)
+        let dir = temp_dir("apply-absent");
+        let path = dir.join("agent.toml");
+        std::fs::write(
+            &path,
+            "[control]\ncontrol_addr = \"127.0.0.1:0\"\ntenant_id = \"t\"\ntrust_dir = \"trust\"\nagent_key_file = \"k\"\n[control.cert]\nca_paths = []\ncert_chain = \"c\"\nkey = \"k\"\n",
+        )
+        .unwrap();
+        let cfg = load_config(&path).expect("control config without [control.apply] loads");
+        let control = cfg.control.expect("[control] present");
+        assert_eq!(control.apply, None, "apply omitted -> None");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // present + partial -> defaults fill
+        let cfg: ApplyConfig =
+            toml::from_str("enabled = true\nallowed_methods = [\"Shell\"]\n").unwrap();
+        assert!(cfg.enabled);
+        assert_eq!(cfg.allowed_methods, vec![Method::Shell]);
+        assert_eq!(cfg.exec_timeout_secs, 300);
+        assert_eq!(cfg.max_output_bytes, 65536);
+
+        // fully absent ApplyConfig TOML -> all defaults (disabled, empty allow-list)
+        let def: ApplyConfig = toml::from_str("").unwrap();
+        assert!(!def.enabled);
+        assert!(def.allowed_methods.is_empty());
+        assert_eq!(def.exec_timeout_secs, 300);
+        assert_eq!(def.max_output_bytes, 65536);
     }
 }
