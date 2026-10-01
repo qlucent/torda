@@ -136,7 +136,7 @@ impl Verifier for FixedVerifier {
     }
 }
 
-/// Agent side: accept ONE mTLS connection, build the UNCHANGED P3b loop on the cert-derived
+/// Agent side: accept ONE mTLS connection, build the UNCHANGED P3b loop on the TLS-exported
 /// session, `serve_one` command, and report `(session, served, state)`.
 fn run_agent_once(
     listener: TcpListener,

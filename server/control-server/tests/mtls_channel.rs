@@ -33,9 +33,7 @@ use torda_remediation::audit::VecAuditSink;
 use torda_remediation::bridge::{Bridge, Executor, Verifier, VerifyOutcome};
 use torda_remediation::control::{CommandKind, ControlCommand, Role, RolePolicy, SystemClock};
 use torda_transport::Transport;
-use torda_transport_tls::{
-    accept, client_config, generate_test_pki, server_config, session_from_cert,
-};
+use torda_transport_tls::{accept, client_config, generate_test_pki, server_config};
 
 /// Generous read timeout: the loopback round-trip completes in milliseconds; this only
 /// exists so a misbehaving/aborted handshake can never hang the test suite.
@@ -96,7 +94,7 @@ impl Verifier for FixedVerifier {
 }
 
 /// Agent side: accept ONE mTLS connection off `listener`, build the UNCHANGED P3b-6 loop
-/// on the cert-derived session, `serve_one` command, and report `(session, served, state)`.
+/// on the TLS-exported session, `serve_one` command, and report `(session, served, state)`.
 fn run_agent_once(
     listener: TcpListener,
     cfg: Arc<ServerConfig>,
@@ -183,7 +181,7 @@ fn mtls_round_trip_drives_the_unchanged_loop() {
     );
     assert_eq!(
         agent_session, client_session,
-        "both ends independently derived the SAME session id from the client cert"
+        "both ends independently derived the SAME TLS-exported session id"
     );
     assert_eq!(
         state,
@@ -230,21 +228,105 @@ fn an_untrusted_client_is_rejected_at_the_handshake() {
 }
 
 #[test]
-fn session_is_bound_to_the_peer_cert() {
-    let pki_a = generate_test_pki();
-    let pki_b = generate_test_pki();
+fn reconnect_with_same_cert_rejects_old_signed_command_and_accepts_current_session() {
+    let pki = generate_test_pki();
+    let server_cfg = server_config(&pki);
+    let client_cfg = client_config(&pki);
+    let client_leaf = pki.client_cert_chain[0].clone();
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind control listener");
+    let port = listener.local_addr().unwrap().port();
 
-    let session_a = session_from_cert(pki_a.client_cert_chain[0].as_ref());
-    let session_b = session_from_cert(pki_b.client_cert_chain[0].as_ref());
+    let agent = thread::spawn(move || {
+        let mut sessions = Vec::new();
+        let mut second_results = Vec::new();
+        for connection in 0..2 {
+            let (stream, _) = listener.accept().expect("accept connection");
+            stream.set_read_timeout(Some(READ_TIMEOUT)).unwrap();
+            let (mut transport, session) = accept(stream, server_cfg.clone()).expect("mTLS accept");
+            sessions.push(session.clone());
 
-    assert!(!session_a.is_empty(), "the derived session id is non-empty");
-    assert_eq!(session_a.len(), 16, "session id is 16 hex chars");
+            let operator = CommandSigner::from_seed("operator", [7u8; 32]);
+            let agent_signer = CommandSigner::from_seed("agent-1", [42u8; 32]);
+            let mut verifier = Ed25519Verifier::new();
+            verifier.trust(&operator.actor, operator.verifying_key());
+            let mut policy = RolePolicy::new();
+            policy.assign("operator", Role::Operator);
+            let handler = AgentControlHandler::new(&verifier, &policy, &agent_signer);
+            let mut loop_ = AgentControlLoop::with_session(
+                handler,
+                &session,
+                0,
+                Box::new(NoopExec),
+                Box::new(FixedVerifier),
+            );
+            let mut bridge = Bridge::new(VecAuditSink::default());
+            let count = if connection == 0 { 1 } else { 2 };
+            for _ in 0..count {
+                assert!(loop_
+                    .serve_one(&mut transport, &mut bridge, &SystemClock)
+                    .unwrap());
+                second_results.push(bridge.state("a"));
+            }
+        }
+        (sessions, second_results)
+    });
+
+    let connect_once = |cfg: Arc<rustls::ClientConfig>| {
+        let stream = TcpStream::connect(("127.0.0.1", port)).expect("client TCP connect");
+        stream.set_read_timeout(Some(READ_TIMEOUT)).unwrap();
+        let name = ServerName::try_from("localhost").unwrap();
+        connect(stream, cfg, name, &client_leaf).expect("mTLS connect")
+    };
+    let operator = CommandSigner::from_seed("operator", [7u8; 32]);
+    let agent_signer = CommandSigner::from_seed("agent-1", [42u8; 32]);
+    let mut result_verifier = Ed25519Verifier::new();
+    result_verifier.trust(&agent_signer.actor, agent_signer.verifying_key());
+    let mut client = ControlPlaneClient::new(operator, result_verifier);
+
+    let (mut first, old_session) = connect_once(client_cfg.clone());
+    let mut old_command = draft_cmd("operator", &old_session, 1);
+    client.sign(&mut old_command);
+    let old_command_for_replay: ControlCommand =
+        serde_json::from_slice(&serde_json::to_vec(&old_command).unwrap()).unwrap();
+    client.send_command(&mut first, old_command).unwrap();
+    assert_eq!(
+        client.await_result(&mut first).unwrap().unwrap().outcome,
+        CommandOutcome::Applied
+    );
+    drop(first);
+
+    let (mut second, current_session) = connect_once(client_cfg);
+    assert_eq!(old_session.len(), 64, "full 32-byte exporter is encoded");
+    assert!(old_session.chars().all(|c| c.is_ascii_hexdigit()));
     assert_ne!(
-        session_a, session_b,
-        "a DIFFERENT client cert yields a DIFFERENT session id"
+        old_session, current_session,
+        "same certificate must get a fresh session"
+    );
+
+    client
+        .send_command(&mut second, old_command_for_replay)
+        .unwrap();
+    assert_eq!(
+        client.await_result(&mut second).unwrap().unwrap().outcome,
+        CommandOutcome::Rejected,
+        "old signed command must be rejected on a new TLS connection"
+    );
+    let mut current_command = draft_cmd("operator", &current_session, 1);
+    client.sign(&mut current_command);
+    client.send_command(&mut second, current_command).unwrap();
+    assert_eq!(
+        client.await_result(&mut second).unwrap().unwrap().outcome,
+        CommandOutcome::Applied,
+        "a correctly signed command for the current session is accepted"
+    );
+
+    let (agent_sessions, states) = agent.join().expect("agent joins");
+    assert_eq!(agent_sessions, vec![old_session, current_session]);
+    assert_eq!(
+        states,
+        vec![Some(ActionState::Drafted), None, Some(ActionState::Drafted)]
     );
 }
-
 #[test]
 fn control_and_telemetry_use_physically_distinct_ports() {
     // Realizes the physical control/telemetry separation P3b-4..6 only modeled: control
@@ -292,4 +374,36 @@ fn control_and_telemetry_use_physically_distinct_ports() {
             other.map(|_| "a connection")
         ),
     }
+}
+
+#[test]
+fn accept_rejects_missing_peer_certificate_even_if_config_allows_it() {
+    let pki = generate_test_pki();
+    let cfg = Arc::new(
+        ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_no_client_auth()
+            .with_single_cert(pki.server_cert_chain.clone(), pki.server_key.clone_key())
+            .unwrap(),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let agent = thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        stream.set_read_timeout(Some(READ_TIMEOUT)).unwrap();
+        match accept(stream, cfg) {
+            Err(err) => assert_eq!(err.kind(), ErrorKind::PermissionDenied),
+            Ok(_) => panic!("control transport must require a client certificate"),
+        }
+    });
+    let stream = TcpStream::connect(addr).unwrap();
+    stream.set_read_timeout(Some(READ_TIMEOUT)).unwrap();
+    let _client = connect(
+        stream,
+        client_config(&pki),
+        ServerName::try_from("localhost").unwrap(),
+        &pki.client_cert_chain[0],
+    );
+    agent.join().unwrap();
 }

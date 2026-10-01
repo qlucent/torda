@@ -20,9 +20,6 @@ rustls-pki-types = { version = "1", features = ["std"] }
 # `write_pki_to_*` test/demo helpers; the crypto itself is untouched. Small, not heavy.
 base64 = "0.22"
 rcgen = "0.13"
-# SHA-256 for deriving the session id from the authenticated peer cert. Already in the
-# tree via rustls' ring provider; used here directly so the hash is audited, not hand-rolled.
-ring = "0.17"
 
 # No [dev-dependencies]: the mTLS client<->server round-trip integration tests (which needed
 # the FSL issuer `ControlPlaneClient` + `connect`) now live in `server/control-server/tests`,
