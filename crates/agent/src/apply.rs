@@ -22,6 +22,17 @@ impl RealExecutor {
         }
         Ok(())
     }
+    /// Scoped-targets gate: this agent executes ONLY against the single asset it
+    /// represents (`cfg.host_id`). The Bridge calls `apply`/`rollback` once per
+    /// selected asset; running the payload for a target that is not this host would
+    /// mutate the local host while auditing success for some other asset id. Fail
+    /// closed (no process spawned) if `host_id` is unset or the target is not us.
+    fn host_targeted(&self, target: &str) -> anyhow::Result<()> {
+        if self.cfg.host_id.is_empty() || target != self.cfg.host_id {
+            anyhow::bail!("target not permitted for this host");
+        }
+        Ok(())
+    }
     fn run(&self, payload: &str) -> anyhow::Result<()> {
         run_bounded(
             payload,
@@ -41,12 +52,14 @@ impl Executor for RealExecutor {
             action.targets.asset_ids.len()
         )
     }
-    fn apply(&mut self, action: &RemediationAction, _target: &str) -> anyhow::Result<()> {
+    fn apply(&mut self, action: &RemediationAction, target: &str) -> anyhow::Result<()> {
         self.permitted(action)?;
+        self.host_targeted(target)?;
         self.run(&action.payload)
     }
-    fn rollback(&mut self, action: &RemediationAction, _target: &str) -> anyhow::Result<()> {
+    fn rollback(&mut self, action: &RemediationAction, target: &str) -> anyhow::Result<()> {
         self.permitted(action)?;
+        self.host_targeted(target)?;
         match &action.rollback {
             Some(p) => self.run(p),
             None => Ok(()),
@@ -57,12 +70,16 @@ impl Executor for RealExecutor {
 #[derive(Debug, Default)]
 pub struct RealVerifier;
 impl Verifier for RealVerifier {
-    fn verify(&self, action: &RemediationAction, applied: &[String]) -> VerifyOutcome {
-        let targets = &action.targets.asset_ids;
-        if !targets.is_empty() && targets.iter().all(|t| applied.iter().any(|a| a == t)) {
-            VerifyOutcome::Fixed
-        } else {
+    fn verify(&self, _action: &RemediationAction, applied: &[String]) -> VerifyOutcome {
+        // Stage-aware: the Bridge applies a cohort/stage (canary = a SUBSET of the
+        // action's targets) and passes only the targets whose `apply` returned Ok.
+        // The agent cannot re-check findings here, so a non-empty applied set is the
+        // honest success signal for whatever stage was applied; requiring ALL action
+        // targets would fail every partial-cohort canary and strand the rollout.
+        if applied.is_empty() {
             VerifyOutcome::NotFixed
+        } else {
+            VerifyOutcome::Fixed
         }
     }
 }
@@ -83,6 +100,14 @@ fn run_bounded(payload: &str, timeout: Duration, max_bytes: usize) -> Result<(),
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    // UNIX: make the child its own process-group leader (pgid == child pid) so that on
+    // timeout we can signal the WHOLE group — the shell plus any grandchildren it
+    // spawned — not just `sh`. `process_group` is stable since Rust 1.64.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
     let mut child = cmd.spawn().map_err(|_| "spawn failed".to_string())?;
     // Drain pipes in threads so a chatty child can't block on a full pipe; cap the read.
     let cap = max_bytes as u64;
@@ -111,15 +136,13 @@ fn run_bounded(payload: &str, timeout: Duration, max_bytes: usize) -> Result<(),
             Ok(Some(s)) => break Some(s),
             Ok(None) => {
                 if Instant::now() >= deadline {
-                    let _ = child.kill();
-                    let _ = child.wait();
+                    kill_tree(&mut child);
                     break None;
                 }
                 std::thread::sleep(Duration::from_millis(50));
             }
             Err(_) => {
-                let _ = child.kill();
-                let _ = child.wait();
+                kill_tree(&mut child);
                 break None;
             }
         }
@@ -133,6 +156,29 @@ fn run_bounded(payload: &str, timeout: Duration, max_bytes: usize) -> Result<(),
         )),
         None => Err("timed out".to_string()),
     }
+}
+
+/// Terminate the child's ENTIRE process tree, then reap the child. Killing only
+/// `cmd`/`sh` would leave any grandchild (e.g. a backgrounded subprocess) alive to
+/// keep mutating the host after we report a timeout. Best-effort and secret-free.
+#[cfg(unix)]
+fn kill_tree(child: &mut std::process::Child) {
+    // A NEGATIVE pid targets the process GROUP; the child leads its own group
+    // (set via `process_group(0)` at spawn), so this reaches the shell + descendants.
+    let _ = Command::new("kill")
+        .arg("-KILL")
+        .arg(format!("-{}", child.id()))
+        .status();
+    let _ = child.wait();
+}
+
+/// Windows variant: `taskkill /T` terminates the child and its whole tree.
+#[cfg(windows)]
+fn kill_tree(child: &mut std::process::Child) {
+    let _ = Command::new("taskkill")
+        .args(["/F", "/T", "/PID", &child.id().to_string()])
+        .output();
+    let _ = child.wait();
 }
 
 #[cfg(test)]
@@ -176,6 +222,7 @@ mod tests {
             allowed_methods: vec![Method::Shell],
             exec_timeout_secs: timeout,
             max_output_bytes: 1024,
+            host_id: "h1".into(),
         }
     }
     // portable no-op success; `exit 0`/`cmd /C` both succeed on empty-ish commands
@@ -254,15 +301,87 @@ mod tests {
             .is_err()); // runs, fails
     }
 
+    // #3: stage-aware verify — a non-empty applied set (even a canary SUBSET of the
+    // action's larger target list) is Fixed; only an empty applied set is NotFixed.
     #[test]
-    fn verifier_fixed_only_when_all_targets_applied() {
+    fn verifier_fixed_when_applied_nonempty_including_canary_subset() {
         let v = RealVerifier;
-        let a = action(Method::Shell, OK, None, &["h1", "h2"]);
+        let a = action(Method::Shell, OK, None, &["h1", "h2", "h3"]);
+        // canary cohort: a strict, non-empty subset must verify Fixed (else rollout
+        // is never reached) — this was the P2 regression.
+        assert_eq!(v.verify(&a, &["h1".into()]), VerifyOutcome::Fixed);
         assert_eq!(
             v.verify(&a, &["h1".into(), "h2".into()]),
             VerifyOutcome::Fixed
         );
-        assert_eq!(v.verify(&a, &["h1".into()]), VerifyOutcome::NotFixed);
+        // nothing applied => NotFixed.
         assert_eq!(v.verify(&a, &[]), VerifyOutcome::NotFixed);
+    }
+
+    // #2: scoped-targets — only the asset this agent represents (host_id) may run the
+    // payload. A mismatched target (or an unset host_id) fails closed with NOTHING run.
+    #[test]
+    fn apply_rejects_target_that_is_not_this_host() {
+        // host_id is "h1" (from cfg). FAIL would surface as "exit 7" if it ran; the
+        // scope check must short-circuit to "target not permitted" with no spawn.
+        let mut ex = RealExecutor::new(cfg(30));
+        let e = ex
+            .apply(&action(Method::Shell, FAIL, None, &["other"]), "other")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            e.contains("target not permitted"),
+            "scope error, not exec: {e}"
+        );
+        let e = ex
+            .rollback(&action(Method::Shell, OK, Some(FAIL), &["other"]), "other")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            e.contains("target not permitted"),
+            "rollback scoped too: {e}"
+        );
+        // Matching target runs for real (OK succeeds).
+        ex.apply(&action(Method::Shell, OK, None, &["h1"]), "h1")
+            .unwrap();
+    }
+
+    #[test]
+    fn empty_host_id_fails_closed_even_when_enabled() {
+        let mut ex = RealExecutor::new(ApplyConfig {
+            host_id: String::new(),
+            ..cfg(30)
+        });
+        // Even an empty target must not match an empty host_id.
+        let e = ex
+            .apply(&action(Method::Shell, OK, None, &[""]), "")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            e.contains("target not permitted"),
+            "unset host_id must refuse: {e}"
+        );
+    }
+
+    // #1: timeout kills the whole tree. The payload backgrounds a long-lived
+    // grandchild AND keeps the shell busy so the shell itself times out; on timeout we
+    // signal the group/tree (not just the shell). Cross-platform we can't portably
+    // assert the grandchild is dead, so this asserts the tree-kill timeout path runs:
+    // Err is returned promptly and we do NOT hang on a surviving grandchild's pipe.
+    #[test]
+    fn timeout_tree_kill_path_returns_promptly_with_backgrounded_child() {
+        let mut ex = RealExecutor::new(cfg(1)); // 1s timeout
+        let payload = if cfg!(windows) {
+            "start /b ping -n 30 127.0.0.1 >NUL & ping -n 30 127.0.0.1 >NUL"
+        } else {
+            "sleep 30 & sleep 30"
+        };
+        let start = std::time::Instant::now();
+        let r = ex.apply(&action(Method::Shell, payload, None, &["h1"]), "h1");
+        assert!(r.is_err(), "a timed-out payload is an error");
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(4),
+            "tree-kill timeout path must not hang on a surviving grandchild"
+        );
     }
 }

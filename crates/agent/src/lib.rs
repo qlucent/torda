@@ -130,6 +130,8 @@ pub struct RoleEntry {
 ///
 /// # [control.apply]        # OMIT this whole section to keep the safe dry-run default.
 /// # enabled = true          # real execution; OFF unless explicitly set
+/// # host_id = "asset-123"   # REQUIRED when enabled: the asset id this agent IS; a
+/// #                         # real apply runs ONLY on this host (targets != host_id refused)
 /// # allowed_methods = ["Shell"]
 /// # exec_timeout_secs = 300
 /// # max_output_bytes = 65536
@@ -221,11 +223,20 @@ fn default_sink() -> String {
 ///
 /// SAFETY: when enabled, the agent really runs the operator-authored payload on this
 /// host AS THE AGENT'S OS USER — run the agent least-privileged.
+///
+/// `host_id` is the asset id THIS agent represents (set it to match the id the control
+/// plane targets this agent by). It is REQUIRED when `enabled`: a real apply/rollback
+/// runs ONLY when the command's target equals `host_id`, so an empty or mismatched
+/// `host_id` refuses every target (fail-closed scoped targets).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ApplyConfig {
     /// Default `false` (dry-run). Set `true` to run payloads for real.
     #[serde(default)]
     pub enabled: bool,
+    /// The asset id this agent represents. Required when `enabled`: a target that is
+    /// not exactly this id is refused with no process spawned. Default `""` (refuses).
+    #[serde(default)]
+    pub host_id: String,
     /// Allow-listed command methods, e.g. `["Shell"]`. Default empty (nothing allowed).
     #[serde(default)]
     pub allowed_methods: Vec<Method>,
@@ -934,6 +945,7 @@ key = "/t/server.key"
             .starts_with("[dry-run]"));
         let off = ApplyConfig {
             enabled: false,
+            host_id: "h1".into(),
             allowed_methods: vec![Method::Shell],
             exec_timeout_secs: 300,
             max_output_bytes: 65536,
@@ -945,6 +957,7 @@ key = "/t/server.key"
         // enabled => real (preview starts with "[apply:")
         let on = ApplyConfig {
             enabled: true,
+            host_id: "h1".into(),
             allowed_methods: vec![Method::Shell],
             exec_timeout_secs: 300,
             max_output_bytes: 65536,
