@@ -386,6 +386,19 @@ impl Verifier for DryRunVerifier {
     }
 }
 
+/// Choose the control-channel executor/verifier. Real execution is opt-in: only an
+/// `apply` config with `enabled = true` selects [`RealExecutor`]; every other case
+/// (absent config, or `enabled = false`) keeps the safe dry-run no-op.
+fn select_executor(apply: &Option<ApplyConfig>) -> (Box<dyn Executor>, Box<dyn Verifier>) {
+    match apply {
+        Some(a) if a.enabled => (
+            Box::new(RealExecutor::new(a.clone())),
+            Box::new(RealVerifier),
+        ),
+        _ => (Box::new(DryRunExecutor::new()), Box::new(DryRunVerifier)),
+    }
+}
+
 /// A running control service: the bound address, a shutdown flag, and the accept thread's
 /// join handle. Dropping it (or calling [`shutdown`](Self::shutdown)) signals the thread to
 /// stop and joins it, so the service never leaks past the handle.
@@ -488,13 +501,22 @@ pub fn spawn_control_service(cfg: &ControlConfig) -> io::Result<ControlServiceHa
 
     let shutdown_flag = Arc::new(AtomicBool::new(false));
     let thread_flag = shutdown_flag.clone();
+    let apply = cfg.apply.clone();
 
     // --- The dedicated accept thread (OFF tokio): owns verifier/policy/signer so the
     //     handler's `&` borrows are valid for the life of each per-connection loop. ---
     let join = thread::Builder::new()
         .name("torda-control".to_string())
         .spawn(move || {
-            control_accept_loop(listener, server_cfg, verifier, policy, signer, thread_flag);
+            control_accept_loop(
+                listener,
+                server_cfg,
+                verifier,
+                policy,
+                signer,
+                thread_flag,
+                apply,
+            );
         })?;
 
     Ok(ControlServiceHandle {
@@ -513,6 +535,7 @@ fn control_accept_loop(
     policy: RolePolicy,
     signer: CommandSigner,
     shutdown: Arc<AtomicBool>,
+    apply: Option<ApplyConfig>,
 ) {
     // One audited bridge shared across every connection served by this thread.
     let mut bridge = Bridge::new(VecAuditSink::default());
@@ -545,13 +568,11 @@ fn control_accept_loop(
 
                 // Build the gate fresh per connection, borrowing the thread-owned locals.
                 let handler = AgentControlHandler::new(&verifier, &policy, &signer);
-                let mut agent_loop = AgentControlLoop::with_session(
-                    handler,
-                    &session,
-                    0,
-                    Box::new(DryRunExecutor::new()),
-                    Box::new(DryRunVerifier),
-                );
+                // Opt-in real execution: `select_executor` returns the dry-run default
+                // unless `apply.enabled` is explicitly set.
+                let (executor, result_verifier) = select_executor(&apply);
+                let mut agent_loop =
+                    AgentControlLoop::with_session(handler, &session, 0, executor, result_verifier);
 
                 // Serve commands on this connection until it closes / errors / we shut down.
                 serve_connection(&mut agent_loop, &mut transport, &mut bridge, &shutdown);
@@ -862,5 +883,57 @@ key = "/t/server.key"
         assert!(def.allowed_methods.is_empty());
         assert_eq!(def.exec_timeout_secs, 300);
         assert_eq!(def.max_output_bytes, 65536);
+    }
+
+    #[test]
+    fn select_executor_defaults_to_dry_run() {
+        use torda_remediation::action::{
+            AssetSelector, CanarySpec, Method, RemediationAction, VerifySpec,
+        };
+        let action = RemediationAction {
+            id: "a".into(),
+            name: "n".into(),
+            method: Method::Shell,
+            payload: "exit 0".into(),
+            targets: AssetSelector {
+                asset_ids: vec!["h1".into()],
+            },
+            requires_approval: true,
+            dry_run_supported: true,
+            rollback: None,
+            verify: VerifySpec {
+                finding_ids: vec![],
+            },
+            canary: CanarySpec {
+                cohort_size: 1,
+                failure_threshold: 0.0,
+            },
+        };
+        // None and disabled => dry-run (preview starts with "[dry-run]")
+        assert!(select_executor(&None)
+            .0
+            .preview(&action)
+            .starts_with("[dry-run]"));
+        let off = ApplyConfig {
+            enabled: false,
+            allowed_methods: vec![Method::Shell],
+            exec_timeout_secs: 300,
+            max_output_bytes: 65536,
+        };
+        assert!(select_executor(&Some(off))
+            .0
+            .preview(&action)
+            .starts_with("[dry-run]"));
+        // enabled => real (preview starts with "[apply:")
+        let on = ApplyConfig {
+            enabled: true,
+            allowed_methods: vec![Method::Shell],
+            exec_timeout_secs: 300,
+            max_output_bytes: 65536,
+        };
+        assert!(select_executor(&Some(on))
+            .0
+            .preview(&action)
+            .starts_with("[apply:"));
     }
 }
