@@ -127,7 +127,17 @@ pub struct RoleEntry {
 /// ca_paths = ["/etc/torda/ca.pem"]
 /// cert_chain = "/etc/torda/server.pem"
 /// key = "/etc/torda/server.key"
+///
+/// # [control.apply]        # OMIT this whole section to keep the safe dry-run default.
+/// # enabled = true          # real execution; OFF unless explicitly set
+/// # allowed_methods = ["Shell"]
+/// # exec_timeout_secs = 300
+/// # max_output_bytes = 65536
 /// ```
+///
+/// SAFETY: with `[control.apply]` `enabled = true`, the agent really runs the
+/// operator-authored payload on this host AS THE AGENT'S OS USER — run the agent
+/// least-privileged.
 ///
 /// NOTE (Task 1/Task 2 boundary): the `[agent]` and `[output]` sections PARSE and are TESTED
 /// here, but are NOT yet read for run-mode/sink behavior — the agent binary still resolves
@@ -204,17 +214,25 @@ fn default_sink() -> String {
     "stdout".to_string()
 }
 
-/// Opt-in real-apply configuration. ABSENT or `enabled=false` keeps the agent on the
-/// safe dry-run executor. `allowed_methods` is an allow-list; a method not listed is
-/// refused before any process is spawned.
+/// The `[control.apply]` section (OPTIONAL, OMITTED BY DEFAULT): opt-in real command
+/// execution. ABSENT, or present with `enabled = false`, keeps the agent on the safe
+/// dry-run executor (no host mutation). `allowed_methods` is an allow-list; a method not
+/// listed is refused before any process is spawned — only `"Shell"` is supported today.
+///
+/// SAFETY: when enabled, the agent really runs the operator-authored payload on this
+/// host AS THE AGENT'S OS USER — run the agent least-privileged.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ApplyConfig {
+    /// Default `false` (dry-run). Set `true` to run payloads for real.
     #[serde(default)]
     pub enabled: bool,
+    /// Allow-listed command methods, e.g. `["Shell"]`. Default empty (nothing allowed).
     #[serde(default)]
     pub allowed_methods: Vec<Method>,
+    /// Per-command execution timeout in seconds. Default `300`.
     #[serde(default = "default_exec_timeout_secs")]
     pub exec_timeout_secs: u64,
+    /// Captured stdout/stderr cap in bytes. Default `65536`.
     #[serde(default = "default_max_output_bytes")]
     pub max_output_bytes: usize,
 }
