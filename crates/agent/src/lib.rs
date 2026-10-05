@@ -28,6 +28,9 @@
 //! The control service runs on a DEDICATED `std::thread` (plain `std::net` + synchronous
 //! rustls), entirely OFF any tokio runtime.
 
+mod apply;
+pub use apply::{RealExecutor, RealVerifier};
+
 use std::io;
 use std::net::{SocketAddr, TcpListener};
 use std::path::{Path, PathBuf};
