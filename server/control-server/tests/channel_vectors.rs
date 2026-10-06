@@ -333,6 +333,7 @@ fn a_result_frame_or_garbage_at_the_agent_does_not_panic_or_mutate() {
         agent: agent.actor.clone(),
         session: SESSION.into(),
         seq: 1,
+        stage: None,
         signature: String::new(),
     };
     let wrong_dir = serde_json::to_vec(&ControlFrame::Result(stray_result)).unwrap();

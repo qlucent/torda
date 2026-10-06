@@ -44,6 +44,7 @@ fn signed_result(
         agent: agent.actor.clone(),
         session: session.into(),
         seq,
+        stage: None,
         signature: String::new(),
     };
     r.signature = agent.sign_payload(&r.payload());
