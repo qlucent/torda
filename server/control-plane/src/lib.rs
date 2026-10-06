@@ -446,6 +446,14 @@ pub struct CommandResult {
     /// `signature` (folded into `payload()`) for the same reason as `session`. No
     /// guard consumes it yet.
     pub seq: u64,
+    /// Typed stage fate for execution results (Canary/Rollout) — `Promoted`/`Closed`/
+    /// `RolledBack`/`AppliedUnverified`. `None` for lifecycle/reject results. Folded into
+    /// `payload()` only when `Some`, so a `None` result signs byte-identically to the
+    /// pre-`stage` protocol (existing signatures stay valid) while a `Some` stage is signed
+    /// and cannot be forged by a relay. `#[serde(default)]` lets older results (no `stage`
+    /// key) deserialize as `None`.
+    #[serde(default)]
+    pub stage: Option<StageOutcome>,
     /// Hex-encoded ed25519 signature over `payload()` (the unsigned result). Excluded
     /// from `payload()` itself so signing does not alter what is signed.
     pub signature: String,
@@ -468,6 +476,8 @@ impl CommandResult {
             agent: &'a str,
             session: &'a str,
             seq: u64,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            stage: &'a Option<StageOutcome>,
         }
         serde_json::to_string(&Unsigned {
             action_id: &self.action_id,
@@ -476,6 +486,7 @@ impl CommandResult {
             agent: &self.agent,
             session: &self.session,
             seq: self.seq,
+            stage: &self.stage,
         })
         .expect("CommandResult is always serializable")
     }
@@ -540,7 +551,7 @@ impl<'a> AgentControlHandler<'a> {
         let session = cmd.session.clone();
         let seq = cmd.seq;
         let (outcome, detail) = Self::classify(dispatch(bridge, cmd, self.verifier, self.authz));
-        self.sign_outcome(action_id, session, seq, outcome, detail)
+        self.sign_outcome(action_id, session, seq, outcome, detail, None)
     }
 
     /// The REPLAY-GUARDED sibling of [`handle`](Self::handle). It is byte-for-byte the
@@ -570,7 +581,7 @@ impl<'a> AgentControlHandler<'a> {
             self.verifier,
             self.authz,
         ));
-        self.sign_outcome(action_id, session, seq, outcome, detail)
+        self.sign_outcome(action_id, session, seq, outcome, detail, None)
     }
 
     /// The REPLAY-GUARDED EXECUTION sibling of [`handle_fresh`](Self::handle_fresh): the
@@ -601,7 +612,7 @@ impl<'a> AgentControlHandler<'a> {
         let session = cmd.session.clone();
         let seq = cmd.seq;
         // The ONLY execution path: authn -> freshness (guard) -> authz -> run the stage.
-        let (outcome, detail) = match dispatch_execution_fresh(
+        let (outcome, detail, stage) = match dispatch_execution_fresh(
             bridge,
             guard,
             cmd,
@@ -611,11 +622,11 @@ impl<'a> AgentControlHandler<'a> {
             verifier,
         ) {
             // The stage's fate (Promoted/Closed/RolledBack/AppliedUnverified) becomes the
-            // result detail so the issuer learns exactly what the execution did.
-            Ok(stage) => (CommandOutcome::Applied, format!("{stage:?}")),
-            Err(e) => (CommandOutcome::Rejected, e.to_string()),
+            // result detail (unchanged) AND the typed, signed `stage` field.
+            Ok(stage) => (CommandOutcome::Applied, format!("{stage:?}"), Some(stage)),
+            Err(e) => (CommandOutcome::Rejected, e.to_string(), None),
         };
-        self.sign_outcome(action_id, session, seq, outcome, detail)
+        self.sign_outcome(action_id, session, seq, outcome, detail, stage)
     }
 
     /// Map a lifecycle-dispatch `Result` to `(CommandOutcome, detail)`: Applied + `"applied"`
@@ -642,6 +653,7 @@ impl<'a> AgentControlHandler<'a> {
         seq: u64,
         outcome: CommandOutcome,
         detail: String,
+        stage: Option<StageOutcome>,
     ) -> CommandResult {
         let mut result = CommandResult {
             action_id,
@@ -650,6 +662,7 @@ impl<'a> AgentControlHandler<'a> {
             agent: self.signer.actor.clone(),
             session,
             seq,
+            stage,
             signature: String::new(),
         };
         result.signature = self.signer.sign_payload(&result.payload());
@@ -821,7 +834,7 @@ impl<'a> AgentControlLoop<'a> {
                             Err(e) => (CommandOutcome::Rejected, e.to_string()),
                         };
                         self.handler
-                            .sign_outcome(action_id, session, seq, outcome, detail)
+                            .sign_outcome(action_id, session, seq, outcome, detail, None)
                     } else {
                         self.handler.execute_fresh(
                             bridge,
@@ -1598,6 +1611,7 @@ mod tests {
             agent: "agent-1".into(),
             session: "s1".into(),
             seq: 1,
+            stage: None,
             signature: "aaaa".into(),
         };
         let other = CommandResult {
@@ -1635,6 +1649,7 @@ mod tests {
             agent: agent.actor.clone(),
             session: "sess-1".into(),
             seq: 5,
+            stage: None,
             signature: String::new(),
         };
         result.signature = agent.sign_payload(&result.payload());
@@ -1692,5 +1707,161 @@ mod tests {
             "result echoes the command's session"
         );
         assert_eq!(result.seq, expected_seq, "result echoes the command's seq");
+    }
+
+    // --- `CommandResult.stage` (typed, signed, backward-compatible) ---
+
+    #[test]
+    fn none_stage_payload_has_no_stage_key_and_roundtrips() {
+        let r = CommandResult {
+            action_id: "a".into(),
+            outcome: CommandOutcome::Applied,
+            detail: "applied".into(),
+            agent: "host-1".into(),
+            session: "s".repeat(64),
+            seq: 1,
+            stage: None,
+            signature: String::new(),
+        };
+        let p = r.payload();
+        assert!(
+            !p.contains("stage"),
+            "None stage must NOT appear in the signed payload (backward-compat)"
+        );
+        // sign + verify round-trips
+        let signer = CommandSigner::from_seed("host-1", [9u8; 32]);
+        let mut signed = r.clone();
+        signed.signature = signer.sign_payload(&signed.payload());
+        let mut v = Ed25519Verifier::new();
+        v.trust("host-1", signer.verifying_key());
+        assert!(v.verify(&signed.payload(), &signed.signature, "host-1"));
+    }
+
+    #[test]
+    fn some_stage_is_in_payload_and_roundtrips_and_tamper_breaks_sig() {
+        let r = CommandResult {
+            action_id: "a".into(),
+            outcome: CommandOutcome::Applied,
+            detail: "Promoted".into(),
+            agent: "host-1".into(),
+            session: "s".repeat(64),
+            seq: 1,
+            stage: Some(StageOutcome::Promoted),
+            signature: String::new(),
+        };
+        assert!(r.payload().contains("Promoted"));
+        // serde round-trip of the struct preserves the typed stage
+        let j = serde_json::to_string(&r).unwrap();
+        assert_eq!(
+            serde_json::from_str::<CommandResult>(&j).unwrap().stage,
+            Some(StageOutcome::Promoted)
+        );
+        // signature covers stage: tampering it invalidates
+        let signer = CommandSigner::from_seed("host-1", [9u8; 32]);
+        let mut signed = r.clone();
+        signed.signature = signer.sign_payload(&signed.payload());
+        let mut v = Ed25519Verifier::new();
+        v.trust("host-1", signer.verifying_key());
+        let mut tampered = signed.clone();
+        tampered.stage = Some(StageOutcome::RolledBack);
+        assert!(
+            !v.verify(&tampered.payload(), &signed.signature, "host-1"),
+            "tampered stage must fail verify"
+        );
+    }
+
+    #[test]
+    fn old_result_json_without_stage_deserializes_to_none() {
+        let json = r#"{"action_id":"a","outcome":"Applied","detail":"applied","agent":"host-1","session":"s","seq":1,"signature":"ab"}"#;
+        let r: CommandResult = serde_json::from_str(json).unwrap();
+        assert_eq!(r.stage, None);
+    }
+
+    #[test]
+    fn execution_result_has_some_stage_reject_has_none() {
+        use torda_remediation::bridge::VerifyOutcome;
+
+        /// No-op executor: records nothing, just reports success, so the canary
+        /// below is free to promote (this test only cares about `stage`, not the
+        /// bridge's own canary/rollout mechanics).
+        struct NoOpExec;
+        impl Executor for NoOpExec {
+            fn preview(&self, _a: &RemediationAction) -> String {
+                String::new()
+            }
+            fn apply(&mut self, _a: &RemediationAction, _t: &str) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn rollback(&mut self, _a: &RemediationAction, _t: &str) -> anyhow::Result<()> {
+                Ok(())
+            }
+        }
+        /// Always reports the finding fixed, so a canary promotes.
+        struct Fixed;
+        impl Verifier for Fixed {
+            fn verify(&self, _a: &RemediationAction, _t: &[String]) -> VerifyOutcome {
+                VerifyOutcome::Fixed
+            }
+        }
+
+        let action = RemediationAction {
+            id: "a".into(),
+            name: "n".into(),
+            method: Method::Shell,
+            payload: "echo hi".into(),
+            targets: AssetSelector {
+                asset_ids: vec!["h1".into(), "h2".into(), "h3".into()],
+            },
+            requires_approval: true,
+            dry_run_supported: true,
+            rollback: Some("undo".into()),
+            verify: VerifySpec {
+                finding_ids: vec!["f1".into()],
+            },
+            canary: CanarySpec {
+                cohort_size: 1,
+                failure_threshold: 0.0,
+            },
+        };
+        let mut bridge = Bridge::new(VecAuditSink::default());
+        bridge.draft(action, "operator").unwrap();
+        bridge.dry_run("a", &NoOpExec, "operator").unwrap();
+        bridge.submit_for_approval("a", "operator").unwrap();
+        bridge.approve("a", "approver").unwrap(); // four-eyes: a different actor approves
+
+        let operator = CommandSigner::from_seed("operator", [13u8; 32]);
+        let mut verifier = Ed25519Verifier::new();
+        verifier.trust(&operator.actor, operator.verifying_key());
+        let mut policy = RolePolicy::new();
+        policy.assign("operator", Role::Operator); // the change owner: may execute
+
+        let agent = agent_signer();
+        let handler = AgentControlHandler::new(&verifier, &policy, &agent);
+        let mut guard = ReplayGuard::new();
+        guard.open_session("s1", 0);
+        let mut exec = NoOpExec;
+
+        // An authorized, freshly-signed canary applies and the result carries a
+        // typed stage.
+        let mut canary = command("a", CommandKind::Canary, "operator");
+        operator.sign(&mut canary);
+        let applied = handler.execute_fresh(&mut bridge, &mut guard, canary, &mut exec, &Fixed);
+        assert_eq!(applied.outcome, CommandOutcome::Applied);
+        assert!(
+            applied.stage.is_some(),
+            "an applied execution result carries a typed stage"
+        );
+
+        // Replaying the EXACT same (session, seq) is refused by the freshness
+        // guard before the executor ever runs again — a rejected result carries
+        // no stage.
+        let mut replay = command("a", CommandKind::Canary, "operator");
+        operator.sign(&mut replay);
+        let rejected = handler.execute_fresh(&mut bridge, &mut guard, replay, &mut exec, &Fixed);
+        assert_eq!(rejected.outcome, CommandOutcome::Rejected);
+        assert!(
+            rejected.stage.is_none(),
+            "a rejected execution result carries no stage"
+        );
     }
 }

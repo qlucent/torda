@@ -43,7 +43,7 @@ pub struct TargetResult {
 }
 
 /// The outcome of an execution stage.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum StageOutcome {
     Promoted,
     Closed,
@@ -959,6 +959,24 @@ mod tests {
                 assert_ne!(e.from, Some(ActionState::Canary));
             }
         }
+    }
+
+    #[test]
+    fn stageoutcome_serde_roundtrips_variant_names() {
+        for v in [
+            StageOutcome::Promoted,
+            StageOutcome::Closed,
+            StageOutcome::RolledBack,
+            StageOutcome::AppliedUnverified,
+        ] {
+            let s = serde_json::to_string(&v).unwrap();
+            assert_eq!(serde_json::from_str::<StageOutcome>(&s).unwrap(), v);
+        }
+        // externally-tagged unit variants serialize as their quoted name
+        assert_eq!(
+            serde_json::to_string(&StageOutcome::Promoted).unwrap(),
+            "\"Promoted\""
+        );
     }
 
     /// AUDIT-2 regression: a failed rollback must be audited with `Outcome::Failed`,
