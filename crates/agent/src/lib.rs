@@ -28,6 +28,9 @@
 //! The control service runs on a DEDICATED `std::thread` (plain `std::net` + synchronous
 //! rustls), entirely OFF any tokio runtime.
 
+mod apply;
+pub use apply::{RealExecutor, RealVerifier};
+
 use std::io;
 use std::net::{SocketAddr, TcpListener};
 use std::path::{Path, PathBuf};
@@ -41,7 +44,7 @@ use serde::{Deserialize, Serialize};
 use torda_control_plane::{
     AgentControlHandler, AgentControlLoop, CommandSigner, Ed25519Verifier, ReloadableVerifier,
 };
-use torda_remediation::action::RemediationAction;
+use torda_remediation::action::{Method, RemediationAction};
 use torda_remediation::audit::VecAuditSink;
 use torda_remediation::bridge::{Bridge, Executor, Verifier, VerifyOutcome};
 use torda_remediation::control::{Role, RolePolicy, SystemClock};
@@ -124,7 +127,19 @@ pub struct RoleEntry {
 /// ca_paths = ["/etc/torda/ca.pem"]
 /// cert_chain = "/etc/torda/server.pem"
 /// key = "/etc/torda/server.key"
+///
+/// # [control.apply]        # OMIT this whole section to keep the safe dry-run default.
+/// # enabled = true          # real execution; OFF unless explicitly set
+/// # host_id = "asset-123"   # REQUIRED when enabled: the asset id this agent IS; a
+/// #                         # real apply runs ONLY on this host (targets != host_id refused)
+/// # allowed_methods = ["Shell"]
+/// # exec_timeout_secs = 300
+/// # max_output_bytes = 65536
 /// ```
+///
+/// SAFETY: with `[control.apply]` `enabled = true`, the agent really runs the
+/// operator-authored payload on this host AS THE AGENT'S OS USER — run the agent
+/// least-privileged.
 ///
 /// NOTE (Task 1/Task 2 boundary): the `[agent]` and `[output]` sections PARSE and are TESTED
 /// here, but are NOT yet read for run-mode/sink behavior — the agent binary still resolves
@@ -201,6 +216,46 @@ fn default_sink() -> String {
     "stdout".to_string()
 }
 
+/// The `[control.apply]` section (OPTIONAL, OMITTED BY DEFAULT): opt-in real command
+/// execution. ABSENT, or present with `enabled = false`, keeps the agent on the safe
+/// dry-run executor (no host mutation). `allowed_methods` is an allow-list; a method not
+/// listed is refused before any process is spawned — only `"Shell"` is supported today.
+///
+/// SAFETY: when enabled, the agent really runs the operator-authored payload on this
+/// host AS THE AGENT'S OS USER — run the agent least-privileged.
+///
+/// `host_id` is the asset id THIS agent represents (set it to match the id the control
+/// plane targets this agent by). It is REQUIRED when `enabled`: a real apply/rollback
+/// runs ONLY when the command's target equals `host_id`, so an empty or mismatched
+/// `host_id` refuses every target (fail-closed scoped targets).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApplyConfig {
+    /// Default `false` (dry-run). Set `true` to run payloads for real.
+    #[serde(default)]
+    pub enabled: bool,
+    /// The asset id this agent represents. Required when `enabled`: a target that is
+    /// not exactly this id is refused with no process spawned. Default `""` (refuses).
+    #[serde(default)]
+    pub host_id: String,
+    /// Allow-listed command methods, e.g. `["Shell"]`. Default empty (nothing allowed).
+    #[serde(default)]
+    pub allowed_methods: Vec<Method>,
+    /// Per-command execution timeout in seconds. Default `300`.
+    #[serde(default = "default_exec_timeout_secs")]
+    pub exec_timeout_secs: u64,
+    /// Captured stdout/stderr cap in bytes. Default `65536`.
+    #[serde(default = "default_max_output_bytes")]
+    pub max_output_bytes: usize,
+}
+
+fn default_exec_timeout_secs() -> u64 {
+    300
+}
+
+fn default_max_output_bytes() -> usize {
+    65536
+}
+
 /// The `[control]` section: the ops-provisioned mutual-TLS remediation control channel.
 /// Holds the EXACT fields the control service was configured with before this slice; only
 /// the container changed (a nested TOML section instead of the flat JSON root). The mTLS /
@@ -227,6 +282,9 @@ pub struct ControlConfig {
     /// Actor -> role assignments for the command authorization policy.
     #[serde(default)]
     pub roles: Vec<RoleEntry>,
+    /// Opt-in real-apply config. Absent (the default) keeps the dry-run executor.
+    #[serde(default)]
+    pub apply: Option<ApplyConfig>,
     /// Ops-provisioned mutual-TLS material for the control listener.
     pub cert: CertPaths,
 }
@@ -357,6 +415,19 @@ impl Verifier for DryRunVerifier {
     }
 }
 
+/// Choose the control-channel executor/verifier. Real execution is opt-in: only an
+/// `apply` config with `enabled = true` selects [`RealExecutor`]; every other case
+/// (absent config, or `enabled = false`) keeps the safe dry-run no-op.
+fn select_executor(apply: &Option<ApplyConfig>) -> (Box<dyn Executor>, Box<dyn Verifier>) {
+    match apply {
+        Some(a) if a.enabled => (
+            Box::new(RealExecutor::new(a.clone())),
+            Box::new(RealVerifier),
+        ),
+        _ => (Box::new(DryRunExecutor::new()), Box::new(DryRunVerifier)),
+    }
+}
+
 /// A running control service: the bound address, a shutdown flag, and the accept thread's
 /// join handle. Dropping it (or calling [`shutdown`](Self::shutdown)) signals the thread to
 /// stop and joins it, so the service never leaks past the handle.
@@ -459,13 +530,22 @@ pub fn spawn_control_service(cfg: &ControlConfig) -> io::Result<ControlServiceHa
 
     let shutdown_flag = Arc::new(AtomicBool::new(false));
     let thread_flag = shutdown_flag.clone();
+    let apply = cfg.apply.clone();
 
     // --- The dedicated accept thread (OFF tokio): owns verifier/policy/signer so the
     //     handler's `&` borrows are valid for the life of each per-connection loop. ---
     let join = thread::Builder::new()
         .name("torda-control".to_string())
         .spawn(move || {
-            control_accept_loop(listener, server_cfg, verifier, policy, signer, thread_flag);
+            control_accept_loop(
+                listener,
+                server_cfg,
+                verifier,
+                policy,
+                signer,
+                thread_flag,
+                apply,
+            );
         })?;
 
     Ok(ControlServiceHandle {
@@ -484,6 +564,7 @@ fn control_accept_loop(
     policy: RolePolicy,
     signer: CommandSigner,
     shutdown: Arc<AtomicBool>,
+    apply: Option<ApplyConfig>,
 ) {
     // One audited bridge shared across every connection served by this thread.
     let mut bridge = Bridge::new(VecAuditSink::default());
@@ -516,13 +597,11 @@ fn control_accept_loop(
 
                 // Build the gate fresh per connection, borrowing the thread-owned locals.
                 let handler = AgentControlHandler::new(&verifier, &policy, &signer);
-                let mut agent_loop = AgentControlLoop::with_session(
-                    handler,
-                    &session,
-                    0,
-                    Box::new(DryRunExecutor::new()),
-                    Box::new(DryRunVerifier),
-                );
+                // Opt-in real execution: `select_executor` returns the dry-run default
+                // unless `apply.enabled` is explicitly set.
+                let (executor, result_verifier) = select_executor(&apply);
+                let mut agent_loop =
+                    AgentControlLoop::with_session(handler, &session, 0, executor, result_verifier);
 
                 // Serve commands on this connection until it closes / errors / we shut down.
                 serve_connection(&mut agent_loop, &mut transport, &mut bridge, &shutdown);
@@ -606,6 +685,7 @@ mod config_tests {
                     actor: "operator".to_string(),
                     role: "operator".to_string(),
                 }],
+                apply: None,
                 cert: CertPaths {
                     ca_paths: vec![PathBuf::from("/etc/torda/ca.pem")],
                     cert_chain: PathBuf::from("/etc/torda/server.pem"),
@@ -801,5 +881,90 @@ key = "/t/server.key"
             "missing config surfaces NotFound"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn apply_config_absent_is_none_and_present_fills_defaults() {
+        // absent -> None (via #[serde(default)] on ControlConfig.apply)
+        let dir = temp_dir("apply-absent");
+        let path = dir.join("agent.toml");
+        std::fs::write(
+            &path,
+            "[control]\ncontrol_addr = \"127.0.0.1:0\"\ntenant_id = \"t\"\ntrust_dir = \"trust\"\nagent_key_file = \"k\"\n[control.cert]\nca_paths = []\ncert_chain = \"c\"\nkey = \"k\"\n",
+        )
+        .unwrap();
+        let cfg = load_config(&path).expect("control config without [control.apply] loads");
+        let control = cfg.control.expect("[control] present");
+        assert_eq!(control.apply, None, "apply omitted -> None");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // present + partial -> defaults fill
+        let cfg: ApplyConfig =
+            toml::from_str("enabled = true\nallowed_methods = [\"Shell\"]\n").unwrap();
+        assert!(cfg.enabled);
+        assert_eq!(cfg.allowed_methods, vec![Method::Shell]);
+        assert_eq!(cfg.exec_timeout_secs, 300);
+        assert_eq!(cfg.max_output_bytes, 65536);
+
+        // fully absent ApplyConfig TOML -> all defaults (disabled, empty allow-list)
+        let def: ApplyConfig = toml::from_str("").unwrap();
+        assert!(!def.enabled);
+        assert!(def.allowed_methods.is_empty());
+        assert_eq!(def.exec_timeout_secs, 300);
+        assert_eq!(def.max_output_bytes, 65536);
+    }
+
+    #[test]
+    fn select_executor_defaults_to_dry_run() {
+        use torda_remediation::action::{
+            AssetSelector, CanarySpec, Method, RemediationAction, VerifySpec,
+        };
+        let action = RemediationAction {
+            id: "a".into(),
+            name: "n".into(),
+            method: Method::Shell,
+            payload: "exit 0".into(),
+            targets: AssetSelector {
+                asset_ids: vec!["h1".into()],
+            },
+            requires_approval: true,
+            dry_run_supported: true,
+            rollback: None,
+            verify: VerifySpec {
+                finding_ids: vec![],
+            },
+            canary: CanarySpec {
+                cohort_size: 1,
+                failure_threshold: 0.0,
+            },
+        };
+        // None and disabled => dry-run (preview starts with "[dry-run]")
+        assert!(select_executor(&None)
+            .0
+            .preview(&action)
+            .starts_with("[dry-run]"));
+        let off = ApplyConfig {
+            enabled: false,
+            host_id: "h1".into(),
+            allowed_methods: vec![Method::Shell],
+            exec_timeout_secs: 300,
+            max_output_bytes: 65536,
+        };
+        assert!(select_executor(&Some(off))
+            .0
+            .preview(&action)
+            .starts_with("[dry-run]"));
+        // enabled => real (preview starts with "[apply:")
+        let on = ApplyConfig {
+            enabled: true,
+            host_id: "h1".into(),
+            allowed_methods: vec![Method::Shell],
+            exec_timeout_secs: 300,
+            max_output_bytes: 65536,
+        };
+        assert!(select_executor(&Some(on))
+            .0
+            .preview(&action)
+            .starts_with("[apply:"));
     }
 }

@@ -75,6 +75,7 @@ fn write_enabled_config(dir: &Path) -> PathBuf {
                 actor: "operator".into(),
                 role: "operator".into(),
             }],
+            apply: None,
             enabled: true,
         }),
         refresh: Default::default(),
