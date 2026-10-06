@@ -169,6 +169,9 @@ fn kill_tree(child: &mut std::process::Child) {
         .arg("-KILL")
         .arg(format!("-{}", child.id()))
         .status();
+    // Native fallback: if `kill` is missing/fails, still terminate the direct child so
+    // the timeout is ALWAYS enforced — `wait()` must never block forever on the shell.
+    let _ = child.kill();
     let _ = child.wait();
 }
 
@@ -178,6 +181,9 @@ fn kill_tree(child: &mut std::process::Child) {
     let _ = Command::new("taskkill")
         .args(["/F", "/T", "/PID", &child.id().to_string()])
         .output();
+    // Native fallback: if `taskkill` is missing/fails, still terminate the direct child
+    // so the timeout is ALWAYS enforced — `wait()` must never block forever.
+    let _ = child.kill();
     let _ = child.wait();
 }
 
