@@ -52,6 +52,9 @@ pub enum StageOutcome {
     /// fix is left APPLIED (not rolled back) and the action is not Closed — it is
     /// applied-but-unverified (state stays `Verify`); an operator investigates.
     AppliedUnverified,
+    /// Rollback explicitly commanded by an operator (via `CommandKind::Rollback`) on an
+    /// already-applied action — distinct from the internal canary-failure `RolledBack`.
+    RolledBackByOperator,
 }
 
 /// The side-effect-free result of a dry run: the scoped targets and a preview.
@@ -126,6 +129,29 @@ impl<A: AuditSink> Bridge<A> {
             to: crate::action::ActionState::Aborted,
             actor: actor.to_string(),
             outcome: crate::audit::Outcome::Rejected,
+            detail: detail.to_string(),
+        });
+    }
+
+    /// Audits a command that PASSED its state guard, ran, and then FAILED mid-execution
+    /// (e.g. a rollback that reverted some targets but not others). Distinct from
+    /// `audit_rejected_command` (a pre-gate rejection): this records `Outcome::Failed`
+    /// against the action's post-failure state — the run method already set that state.
+    pub fn audit_execution_failure(&mut self, action_id: &str, actor: &str, detail: &str) {
+        let to = self
+            .actions
+            .get(action_id)
+            .map(|r| r.state)
+            .unwrap_or(ActionState::Aborted);
+        let seq = self.seq;
+        self.seq += 1;
+        self.audit.record(AuditEvent {
+            seq,
+            action_id: action_id.to_string(),
+            from: None,
+            to,
+            actor: actor.to_string(),
+            outcome: Outcome::Failed,
             detail: detail.to_string(),
         });
     }
@@ -410,6 +436,85 @@ impl<A: AuditSink> Bridge<A> {
         }
     }
 
+    /// Operator-commanded rollback of an already-applied action. Accepted only from the
+    /// applied states (`Closed`, `Verify` = applied-but-unverified, or a promoted
+    /// `Rollout`); runs `Executor::rollback` over the applied targets and moves to
+    /// `RolledBack`. If the in-memory applied set was lost (agent restart), falls back to
+    /// the action's full target list (host-scoped; rollback scripts must be idempotent).
+    pub fn run_rollback(
+        &mut self,
+        id: &str,
+        executor: &mut dyn Executor,
+        actor: &str,
+    ) -> anyhow::Result<StageOutcome> {
+        let rec = self
+            .actions
+            .get(id)
+            .ok_or_else(|| anyhow::anyhow!("no action {id}"))?;
+        if !matches!(
+            rec.state,
+            ActionState::Closed
+                | ActionState::Verify
+                | ActionState::Rollout
+                | ActionState::RollbackIncomplete
+        ) {
+            let from = rec.state;
+            self.log(
+                id,
+                Some(from),
+                ActionState::RolledBack,
+                actor,
+                Outcome::Rejected,
+                "rollback requires an applied action",
+            );
+            anyhow::bail!("action {id} not in an applied state");
+        }
+        // Fallback: if the applied set was lost (e.g. agent restart), roll back the
+        // full target set instead (host-scoped; rollback scripts must be idempotent).
+        if self.actions.get(id).unwrap().applied.is_empty() {
+            let targets = self
+                .actions
+                .get(id)
+                .unwrap()
+                .action
+                .targets
+                .asset_ids
+                .clone();
+            self.actions.get_mut(id).unwrap().applied = targets;
+        }
+        let failed = self.rollback_applied(id, executor, actor);
+        if !failed.is_empty() {
+            // Some/all targets did NOT revert — the change is STILL on those hosts.
+            // Do NOT move to the terminal `RolledBack`, but DO leave `Rollout`/`Closed`/
+            // `Verify`: move to `RollbackIncomplete` so forward progress (canary/rollout)
+            // is blocked while a retry Rollback is still admitted on the retained failed
+            // targets. Report failure so the signed result is Rejected, not Applied.
+            let n = failed.len();
+            let from = self.actions.get(id).map(|r| r.state);
+            if let Some(rec) = self.actions.get_mut(id) {
+                rec.state = ActionState::RollbackIncomplete;
+            }
+            self.log(
+                id,
+                from,
+                ActionState::RollbackIncomplete,
+                actor,
+                Outcome::Failed,
+                &format!(
+                    "operator-commanded rollback failed on {n} target(s); change still present"
+                ),
+            );
+            anyhow::bail!("rollback failed on {n} target(s)");
+        }
+        self.set_state(
+            id,
+            ActionState::RolledBack,
+            actor,
+            "operator-commanded rollback",
+        );
+        Ok(StageOutcome::RolledBackByOperator)
+    }
+
     /// Global kill switch. Aborts an in-flight action; no further target is touched.
     /// Applied targets are left as-is (an explicit operator rollback is a separate
     /// action) — the partial state is audited.
@@ -476,17 +581,32 @@ impl<A: AuditSink> Bridge<A> {
 
     /// Runs the user's rollback payload on every successfully-applied target
     /// (best-effort — a rollback error is audited but does not stop the others).
-    fn rollback_applied(&mut self, id: &str, executor: &mut dyn Executor, actor: &str) {
+    /// Returns the targets whose `Executor::rollback` FAILED and retains exactly
+    /// those in `Record.applied` (targets that reverted OK are cleared); an empty
+    /// return means every applied target was reverted. Callers that treat rollback
+    /// as best-effort (`run_canary`/`run_rollout`) may ignore the return.
+    fn rollback_applied(
+        &mut self,
+        id: &str,
+        executor: &mut dyn Executor,
+        actor: &str,
+    ) -> Vec<String> {
         let action = self.actions.get(id).unwrap().action.clone();
         let applied = self.actions.get(id).unwrap().applied.clone();
+        let mut failed = Vec::new();
         for t in &applied {
             let (outcome, detail) = match executor.rollback(&action, t) {
                 Ok(()) => (Outcome::Ok, format!("rolled back {t}")),
-                Err(e) => (Outcome::Failed, format!("rollback error on {t}: {e}")),
+                Err(e) => {
+                    failed.push(t.clone());
+                    (Outcome::Failed, format!("rollback error on {t}: {e}"))
+                }
             };
             self.log(id, None, ActionState::RolledBack, actor, outcome, &detail);
         }
-        self.actions.get_mut(id).unwrap().applied.clear();
+        // Retain only the targets still applied (rollback failed); clear reverted ones.
+        self.actions.get_mut(id).unwrap().applied = failed.clone();
+        failed
     }
 
     /// Unguarded internal state set with audit (used inside a stage after its entry
@@ -962,12 +1082,205 @@ mod tests {
     }
 
     #[test]
+    fn run_rollback_only_from_applied_states() {
+        let ro = RecordingExecutor::default();
+        let mut b = Bridge::new(crate::audit::VecAuditSink::default());
+        approved(&mut b, &ro, "a", vec!["h1"]); // Approved, not yet applied
+        let mut ex = RecordingExecutor::default();
+        assert!(
+            b.run_rollback("a", &mut ex, "secops").is_err(),
+            "rollback requires an applied action"
+        );
+        assert!(
+            ex.rolled_back.borrow().is_empty(),
+            "executor must not be touched on rejection"
+        );
+        assert_eq!(b.state("a"), Some(ActionState::Approved));
+    }
+
+    #[test]
+    fn run_rollback_reverts_applied_and_reports_operator_outcome() {
+        let ro = RecordingExecutor::default();
+        let mut b = Bridge::new(crate::audit::VecAuditSink::default());
+        approved(&mut b, &ro, "a", vec!["h1", "h2", "h3"]);
+        let mut ex = RecordingExecutor::default();
+        b.run_canary("a", &mut ex, &AlwaysFixed, "secops").unwrap();
+        b.run_rollout("a", &mut ex, &AlwaysFixed, "secops").unwrap();
+        assert_eq!(b.state("a"), Some(ActionState::Closed));
+
+        let out = b.run_rollback("a", &mut ex, "operator").unwrap();
+        assert_eq!(out, StageOutcome::RolledBackByOperator);
+        assert_eq!(b.state("a"), Some(ActionState::RolledBack));
+        assert_eq!(
+            *ex.rolled_back.borrow(),
+            vec!["h1", "h2", "h3"],
+            "all previously-applied targets were rolled back"
+        );
+    }
+
+    #[test]
+    fn run_rollback_falls_back_to_full_targets_when_applied_empty() {
+        let ro = RecordingExecutor::default();
+        let mut b = Bridge::new(crate::audit::VecAuditSink::default());
+        approved(&mut b, &ro, "a", vec!["h1"]);
+        let mut ex = RecordingExecutor::default();
+        b.run_canary("a", &mut ex, &AlwaysFixed, "secops").unwrap();
+        b.run_rollout("a", &mut ex, &AlwaysFixed, "secops").unwrap();
+        assert_eq!(b.state("a"), Some(ActionState::Closed));
+        // Simulate the in-memory applied set being lost (e.g. an agent restart);
+        // `actions` is a private field but visible from this child test module.
+        b.actions.get_mut("a").unwrap().applied.clear();
+
+        let out = b.run_rollback("a", &mut ex, "operator").unwrap();
+        assert_eq!(out, StageOutcome::RolledBackByOperator);
+        assert_eq!(b.state("a"), Some(ActionState::RolledBack));
+        assert_eq!(
+            *ex.rolled_back.borrow(),
+            vec!["h1"],
+            "fell back to the action's full target list"
+        );
+    }
+
+    #[test]
+    fn run_rollback_failure_is_reported_and_retryable() {
+        /// Rollback fails while `fail` is set, then succeeds once cleared.
+        #[derive(Default)]
+        struct FlakyRollback {
+            fail: std::cell::Cell<bool>,
+            rolled_back: std::cell::RefCell<Vec<String>>,
+        }
+        impl Executor for FlakyRollback {
+            fn preview(&self, _a: &RemediationAction) -> String {
+                String::new()
+            }
+            fn apply(&mut self, _a: &RemediationAction, _t: &str) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn rollback(&mut self, _a: &RemediationAction, target: &str) -> anyhow::Result<()> {
+                if self.fail.get() {
+                    anyhow::bail!("simulated rollback failure on {target}");
+                }
+                self.rolled_back.borrow_mut().push(target.to_string());
+                Ok(())
+            }
+        }
+
+        let ro = RecordingExecutor::default();
+        let mut b = Bridge::new(crate::audit::VecAuditSink::default());
+        approved(&mut b, &ro, "a", vec!["h1"]);
+        let mut ex = FlakyRollback::default();
+        b.run_canary("a", &mut ex, &AlwaysFixed, "secops").unwrap();
+        b.run_rollout("a", &mut ex, &AlwaysFixed, "secops").unwrap();
+        assert_eq!(b.state("a"), Some(ActionState::Closed));
+
+        // First rollback: the script fails -> reported as Err, NOT RolledBack, retryable.
+        ex.fail.set(true);
+        assert!(
+            b.run_rollback("a", &mut ex, "operator").is_err(),
+            "a failed rollback must be reported as failure, not success"
+        );
+        assert_eq!(
+            b.state("a"),
+            Some(ActionState::RollbackIncomplete),
+            "moves to RollbackIncomplete (NOT terminal RolledBack) so a retry is accepted"
+        );
+        assert_eq!(
+            b.actions.get("a").unwrap().applied,
+            vec!["h1"],
+            "the target that did not revert is retained for retry"
+        );
+        assert!(
+            ex.rolled_back.borrow().is_empty(),
+            "nothing actually reverted on the failing attempt"
+        );
+        assert!(
+            b.audit()
+                .events
+                .iter()
+                .any(|e| e.outcome == Outcome::Failed && e.detail.contains("change still present")),
+            "the failure is audited (host truth: change still present)"
+        );
+
+        // Retry with the executor now succeeding: the retained target reverts and closes out.
+        ex.fail.set(false);
+        let out = b.run_rollback("a", &mut ex, "operator").unwrap();
+        assert_eq!(out, StageOutcome::RolledBackByOperator);
+        assert_eq!(b.state("a"), Some(ActionState::RolledBack));
+        assert_eq!(
+            *ex.rolled_back.borrow(),
+            vec!["h1"],
+            "the retained target was reverted on retry"
+        );
+    }
+
+    #[test]
+    fn run_rollback_partial_failure_blocks_rollout() {
+        /// Applies OK; rollback fails while `fail` is set, succeeds once cleared.
+        #[derive(Default)]
+        struct PartialRollback {
+            fail: std::cell::Cell<bool>,
+            rolled_back: std::cell::RefCell<Vec<String>>,
+        }
+        impl Executor for PartialRollback {
+            fn preview(&self, _a: &RemediationAction) -> String {
+                String::new()
+            }
+            fn apply(&mut self, _a: &RemediationAction, _t: &str) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn rollback(&mut self, _a: &RemediationAction, target: &str) -> anyhow::Result<()> {
+                if self.fail.get() {
+                    anyhow::bail!("simulated rollback failure on {target}");
+                }
+                self.rolled_back.borrow_mut().push(target.to_string());
+                Ok(())
+            }
+        }
+
+        let ro = RecordingExecutor::default();
+        let mut b = Bridge::new(crate::audit::VecAuditSink::default());
+        approved(&mut b, &ro, "a", vec!["h1", "h2"]); // cohort 1
+        let mut ex = PartialRollback::default();
+        b.run_canary("a", &mut ex, &AlwaysFixed, "secops").unwrap(); // applies h1 -> Rollout
+        assert_eq!(b.state("a"), Some(ActionState::Rollout));
+
+        // Operator rollback fails on its target: must block forward rollout.
+        ex.fail.set(true);
+        assert!(b.run_rollback("a", &mut ex, "operator").is_err());
+        assert_eq!(
+            b.state("a"),
+            Some(ActionState::RollbackIncomplete),
+            "a failed operator rollback moves to RollbackIncomplete, NOT back to Rollout"
+        );
+
+        // Forward progress (rollout) must NOT be admitted from RollbackIncomplete.
+        assert!(
+            b.run_rollout("a", &mut ex, &AlwaysFixed, "operator")
+                .is_err(),
+            "RollbackIncomplete must not re-apply the payload via rollout"
+        );
+        assert_eq!(b.state("a"), Some(ActionState::RollbackIncomplete));
+
+        // Retry rollback (now succeeding) reverts the retained target and closes out.
+        ex.fail.set(false);
+        let out = b.run_rollback("a", &mut ex, "operator").unwrap();
+        assert_eq!(out, StageOutcome::RolledBackByOperator);
+        assert_eq!(b.state("a"), Some(ActionState::RolledBack));
+        assert_eq!(
+            *ex.rolled_back.borrow(),
+            vec!["h1"],
+            "the retained target was reverted on retry"
+        );
+    }
+
+    #[test]
     fn stageoutcome_serde_roundtrips_variant_names() {
         for v in [
             StageOutcome::Promoted,
             StageOutcome::Closed,
             StageOutcome::RolledBack,
             StageOutcome::AppliedUnverified,
+            StageOutcome::RolledBackByOperator,
         ] {
             let s = serde_json::to_string(&v).unwrap();
             assert_eq!(serde_json::from_str::<StageOutcome>(&s).unwrap(), v);

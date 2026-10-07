@@ -58,6 +58,7 @@ impl Role {
                     | CommandKind::Submit
                     | CommandKind::Canary
                     | CommandKind::Rollout
+                    | CommandKind::Rollback
             ),
             Role::Approver => matches!(kind, CommandKind::Approve | CommandKind::Reject { .. }),
             Role::Responder => matches!(kind, CommandKind::Abort { .. }),
@@ -110,6 +111,9 @@ pub enum CommandKind {
     Canary,
     /// Run the staged rollout of a promoted action (execution — needs an executor).
     Rollout,
+    /// Operator-commanded rollback of an already-applied action (execution — needs an
+    /// executor).
+    Rollback,
 }
 
 impl CommandKind {
@@ -122,6 +126,7 @@ impl CommandKind {
             CommandKind::Abort { .. } => "Abort",
             CommandKind::Canary => "Canary",
             CommandKind::Rollout => "Rollout",
+            CommandKind::Rollback => "Rollback",
         }
     }
 
@@ -131,7 +136,10 @@ impl CommandKind {
     /// to send execution frames down the guarded orchestrator path and every lifecycle
     /// command down `dispatch_fresh`.
     pub fn is_execution(&self) -> bool {
-        matches!(self, CommandKind::Canary | CommandKind::Rollout)
+        matches!(
+            self,
+            CommandKind::Canary | CommandKind::Rollout | CommandKind::Rollback
+        )
     }
 }
 
@@ -303,7 +311,7 @@ pub fn dispatch<A: AuditSink>(
         CommandKind::Approve => bridge.approve(&cmd.action_id, &cmd.actor),
         CommandKind::Reject { reason } => bridge.reject(&cmd.action_id, &cmd.actor, &reason),
         CommandKind::Abort { reason } => bridge.abort(&cmd.action_id, &cmd.actor, &reason),
-        CommandKind::Canary | CommandKind::Rollout => {
+        CommandKind::Canary | CommandKind::Rollout | CommandKind::Rollback => {
             anyhow::bail!(
                 "execution command {} requires the orchestrator",
                 cmd.kind.label()
@@ -535,6 +543,7 @@ pub fn dispatch_execution_fresh<A: AuditSink>(
     match cmd.kind {
         CommandKind::Canary => bridge.run_canary(&cmd.action_id, executor, verifier, &cmd.actor),
         CommandKind::Rollout => bridge.run_rollout(&cmd.action_id, executor, verifier, &cmd.actor),
+        CommandKind::Rollback => bridge.run_rollback(&cmd.action_id, executor, &cmd.actor),
         _ => anyhow::bail!("dispatch_execution_fresh only handles execution commands"),
     }
 }
@@ -1017,6 +1026,42 @@ mod tests {
             "schedule is folded into the payload"
         );
         assert!(base.payload().contains("not_after"));
+    }
+
+    #[test]
+    fn rollback_is_execution_and_operator_permitted() {
+        assert!(CommandKind::Rollback.is_execution());
+        assert!(Role::Operator.permits(&CommandKind::Rollback));
+        assert!(Role::Admin.permits(&CommandKind::Rollback));
+        assert!(!Role::Approver.permits(&CommandKind::Rollback));
+        assert!(!Role::Responder.permits(&CommandKind::Rollback));
+    }
+
+    #[test]
+    fn dispatch_refuses_rollback() {
+        // Rollback is an execution kind (needs an executor): plain `dispatch` — the
+        // lifecycle path with no executor — must refuse it exactly like Canary/Rollout,
+        // even though a validly-signed, Operator-authorized command is presented.
+        let sig = FakeSig("k");
+        let mut b = Bridge::new(VecAuditSink::default());
+        let mut policy = RolePolicy::new();
+        policy.assign("secops", Role::Operator);
+        let mut cmd = ControlCommand {
+            action_id: "a".into(),
+            kind: CommandKind::Rollback,
+            actor: "secops".into(),
+            session: "s1".into(),
+            seq: 1,
+            schedule: None,
+            signature: String::new(),
+        };
+        cmd.signature = sig.sign(&cmd.payload(), &cmd.actor);
+        let out = dispatch(&mut b, cmd, &sig, &policy);
+        assert!(out.is_err(), "dispatch refuses the Rollback execution kind");
+        assert!(out
+            .unwrap_err()
+            .to_string()
+            .contains("requires the orchestrator"));
     }
 
     #[test]
