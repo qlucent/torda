@@ -158,6 +158,9 @@ impl Scheduler {
             }
             // Window OPEN: release the stage. run_* is state-guarded — an aborted /
             // wrong-state action applies nothing (the released command's Err is dropped).
+            // Capture state before dispatch: a run that changed state actually RAN (and
+            // then failed), vs a pre-gate state rejection which leaves state untouched.
+            let before = bridge.state(&p.cmd.action_id);
             let result = match p.cmd.kind {
                 CommandKind::Canary => {
                     bridge.run_canary(&p.cmd.action_id, executor, verifier, &p.cmd.actor)
@@ -174,6 +177,17 @@ impl Scheduler {
             };
             match result {
                 Ok(outcome) => fired.push((p.cmd.action_id.clone(), outcome)),
+                Err(e) if bridge.state(&p.cmd.action_id) != before => {
+                    // The command PASSED its state guard and ran, then FAILED mid-execution
+                    // (e.g. a rollback that reverted some targets but not others — the action
+                    // is now RollbackIncomplete). This is a real execution failure, NOT a
+                    // pre-gate state rejection: surface it distinctly on the audit trail.
+                    bridge.audit_execution_failure(
+                        &p.cmd.action_id,
+                        &p.cmd.actor,
+                        &format!("scheduled {} executed but failed: {e}", p.cmd.kind.label()),
+                    );
+                }
                 // The bridge state guard refused it (e.g. a Rollout whose window opened
                 // before its Canary promoted, or an action aborted out of band): it applied
                 // NOTHING and is dropped. Audit the drop so a scheduled command lost to a
@@ -345,5 +359,87 @@ mod tests {
         );
         assert_eq!(b.state("a"), Some(ActionState::RolledBack));
         assert_eq!(sched.pending_len(), 0, "released — no longer pending");
+    }
+
+    // P2 regression: a scheduled rollback on a VALID applied action whose executor FAILS
+    // mid-revert is an execution failure, NOT a pre-gate "not in a valid state" rejection.
+    #[test]
+    fn scheduled_rollback_execution_failure_is_not_a_state_rejection() {
+        /// Applies OK but every rollback fails.
+        #[derive(Default)]
+        struct FailRollback {
+            applied: Vec<String>,
+        }
+        impl Executor for FailRollback {
+            fn preview(&self, _a: &RemediationAction) -> String {
+                String::new()
+            }
+            fn apply(&mut self, _a: &RemediationAction, t: &str) -> anyhow::Result<()> {
+                self.applied.push(t.to_string());
+                Ok(())
+            }
+            fn rollback(&mut self, _a: &RemediationAction, target: &str) -> anyhow::Result<()> {
+                anyhow::bail!("simulated rollback failure on {target}")
+            }
+        }
+
+        let mut b = Bridge::new(VecAuditSink::default());
+        b.draft(action("a", vec!["h1", "h2"]), "alice").unwrap();
+        b.dry_run("a", &StubExec::default(), "alice").unwrap();
+        b.submit_for_approval("a", "alice").unwrap();
+        b.approve("a", "bob").unwrap();
+        let mut applyer = StubExec::default();
+        b.run_canary("a", &mut applyer, &Fixed, "alice").unwrap();
+        b.run_rollout("a", &mut applyer, &Fixed, "alice").unwrap();
+        assert_eq!(b.state("a"), Some(ActionState::Closed));
+
+        let mut policy = RolePolicy::new();
+        policy.assign("alice", Role::Operator);
+        let mut guard = ReplayGuard::new();
+        guard.open_session("s1", 0);
+        let sig = AcceptAll;
+        let clock = FakeClock::new(5);
+        let mut sched = Scheduler::new();
+
+        let cmd = ControlCommand {
+            action_id: "a".into(),
+            kind: CommandKind::Rollback,
+            actor: "alice".into(),
+            session: "s1".into(),
+            seq: 1,
+            schedule: Some(Schedule {
+                not_before: 10,
+                not_after: 20,
+            }),
+            signature: String::new(),
+        };
+        sched
+            .enqueue(&mut b, &mut guard, cmd, &sig, &policy, &clock)
+            .unwrap();
+
+        clock.set(15);
+        let mut ex = FailRollback::default();
+        let fired = sched.tick(&mut b, &clock, &mut ex, &Fixed);
+        assert!(fired.is_empty(), "a failed rollback is not a fired success");
+        assert_eq!(
+            b.state("a"),
+            Some(ActionState::RollbackIncomplete),
+            "the rollback ran and failed -> RollbackIncomplete (it DID pass its state guard)"
+        );
+
+        let events = &b.audit().events;
+        assert!(
+            !events
+                .iter()
+                .any(|e| e.detail.contains("not in a valid state")),
+            "a real execution failure must NOT be audited as a pre-gate state rejection"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| e.outcome == crate::audit::Outcome::Failed
+                    && e.detail.contains("executed but failed")),
+            "the execution failure is surfaced distinctly on the audit trail"
+        );
     }
 }

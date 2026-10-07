@@ -74,6 +74,9 @@ pub enum ActionState {
     Closed,
     Aborted,
     RolledBack,
+    /// An operator rollback reverted some targets but failed on others; retry
+    /// rollback is allowed, forward progress (canary/rollout) is not.
+    RollbackIncomplete,
 }
 
 #[cfg(test)]
