@@ -1771,6 +1771,39 @@ mod tests {
     }
 
     #[test]
+    fn rolledbackbyoperator_stage_signs_and_roundtrips() {
+        let r = CommandResult {
+            action_id: "a".into(),
+            outcome: CommandOutcome::Applied,
+            detail: "RolledBackByOperator".into(),
+            agent: "host-1".into(),
+            session: "s".repeat(64),
+            seq: 1,
+            stage: Some(StageOutcome::RolledBackByOperator),
+            signature: String::new(),
+        };
+        assert!(r.payload().contains("RolledBackByOperator"));
+        // serde round-trip of the struct preserves the typed stage
+        let j = serde_json::to_string(&r).unwrap();
+        assert_eq!(
+            serde_json::from_str::<CommandResult>(&j).unwrap().stage,
+            Some(StageOutcome::RolledBackByOperator)
+        );
+        // signature covers stage: tampering it invalidates
+        let signer = CommandSigner::from_seed("host-1", [9u8; 32]);
+        let mut signed = r.clone();
+        signed.signature = signer.sign_payload(&signed.payload());
+        let mut v = Ed25519Verifier::new();
+        v.trust("host-1", signer.verifying_key());
+        let mut tampered = signed.clone();
+        tampered.stage = Some(StageOutcome::RolledBack);
+        assert!(
+            !v.verify(&tampered.payload(), &signed.signature, "host-1"),
+            "tampered stage must fail verify"
+        );
+    }
+
+    #[test]
     fn old_result_json_without_stage_deserializes_to_none() {
         let json = r#"{"action_id":"a","outcome":"Applied","detail":"applied","agent":"host-1","session":"s","seq":1,"signature":"ab"}"#;
         let r: CommandResult = serde_json::from_str(json).unwrap();
