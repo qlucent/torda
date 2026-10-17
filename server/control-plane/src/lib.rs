@@ -1475,6 +1475,28 @@ mod tests {
         assert_eq!(result.outcome, CommandOutcome::Rejected);
         assert!(result.stage.is_none());
         assert_eq!(bridge.state("a"), before, "state unchanged on rejection");
+        let last = bridge.audit().events.last().unwrap();
+        assert_eq!(last.outcome, torda_remediation::audit::Outcome::Rejected);
+        assert!(last.detail.contains("already exists"), "{}", last.detail);
+    }
+
+    #[test]
+    fn draft_id_mismatch_is_rejected() {
+        let (operator, verifier, agent, mut bridge, mut guard) = draft_fixture();
+        let handler = AgentControlHandler::new(&verifier, &AllowAll, &agent);
+        let mut cmd = draft_cmd("operator"); // embedded action.id == "a"
+        cmd.action_id = "b".into();
+        operator.sign(&mut cmd);
+
+        let result = handler.handle_draft_fresh(&mut bridge, &mut guard, cmd, &NoMutateExecutor);
+
+        assert_eq!(result.outcome, CommandOutcome::Rejected);
+        assert!(result.detail.contains("mismatch"), "{}", result.detail);
+        assert_eq!(bridge.state("a"), None, "no orphan under the embedded id");
+        assert_eq!(bridge.state("b"), None);
+        let last = bridge.audit().events.last().unwrap();
+        assert_eq!(last.outcome, torda_remediation::audit::Outcome::Rejected);
+        assert!(last.detail.contains("mismatch"));
     }
 
     #[test]
