@@ -306,7 +306,16 @@ pub fn dispatch<A: AuditSink>(
 ) -> anyhow::Result<()> {
     authenticate_and_authorize(bridge, &cmd, sig, authz)?;
     match cmd.kind {
-        CommandKind::Draft(action) => bridge.draft(*action, &cmd.actor),
+        CommandKind::Draft(action) => {
+            // Post-authn: `Bridge::draft` REPLACES an existing record (resetting its
+            // state/payload), so refuse to re-Draft a live action (fail closed).
+            anyhow::ensure!(
+                bridge.state(&action.id).is_none(),
+                "action {} already exists",
+                action.id
+            );
+            bridge.draft(*action, &cmd.actor)
+        }
         CommandKind::Submit => bridge.submit_for_approval(&cmd.action_id, &cmd.actor),
         CommandKind::Approve => bridge.approve(&cmd.action_id, &cmd.actor),
         CommandKind::Reject { reason } => bridge.reject(&cmd.action_id, &cmd.actor, &reason),

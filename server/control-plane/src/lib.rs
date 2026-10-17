@@ -645,15 +645,10 @@ impl<'a> AgentControlHandler<'a> {
         let actor = cmd.actor.clone();
         let session = cmd.session.clone();
         let seq = cmd.seq;
-        // `Bridge::draft` silently REPLACES an existing record (resetting state and
-        // payload), so a wire re-Draft of a live action would roll an approved action back
-        // to Drafted. Fail closed: refuse a Draft for an id the bridge already holds.
-        let result = if bridge.state(&action_id).is_some() {
-            Err(anyhow::anyhow!("action {action_id} already exists"))
-        } else {
-            dispatch_fresh(bridge, guard, cmd, self.verifier, self.authz)
-                .and_then(|()| bridge.dry_run(&action_id, executor, &actor))
-        };
+        // The duplicate-Draft refusal lives in `dispatch` (post-authn), so a forged frame
+        // cannot probe whether an action id exists.
+        let result = dispatch_fresh(bridge, guard, cmd, self.verifier, self.authz)
+            .and_then(|()| bridge.dry_run(&action_id, executor, &actor));
         let (outcome, detail) = match result {
             Ok(_) => (CommandOutcome::Applied, "dry-run preview".to_string()),
             Err(e) => (CommandOutcome::Rejected, e.to_string()),
@@ -1480,6 +1475,26 @@ mod tests {
         assert_eq!(result.outcome, CommandOutcome::Rejected);
         assert!(result.stage.is_none());
         assert_eq!(bridge.state("a"), before, "state unchanged on rejection");
+    }
+
+    #[test]
+    fn forged_draft_for_existing_id_gets_auth_failure_not_exists_oracle() {
+        let (operator, verifier, agent, mut bridge, mut guard) = draft_fixture();
+        let handler = AgentControlHandler::new(&verifier, &AllowAll, &agent);
+        let mut first = draft_cmd("operator");
+        operator.sign(&mut first);
+        handler.handle_draft_fresh(&mut bridge, &mut guard, first, &NoMutateExecutor);
+
+        let attacker = CommandSigner::from_seed("operator", [9u8; 32]);
+        let mut forged = draft_cmd("operator");
+        forged.seq = 2;
+        attacker.sign(&mut forged);
+        let r = handler.handle_draft_fresh(&mut bridge, &mut guard, forged, &NoMutateExecutor);
+
+        assert_eq!(r.outcome, CommandOutcome::Rejected);
+        assert!(r.detail.contains("signature"), "got: {}", r.detail);
+        assert!(!r.detail.contains("already exists"));
+        assert_eq!(bridge.state("a"), Some(ActionState::DryRun));
     }
 
     #[test]
