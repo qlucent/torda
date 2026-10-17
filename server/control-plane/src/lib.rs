@@ -629,6 +629,38 @@ impl<'a> AgentControlHandler<'a> {
         self.sign_outcome(action_id, session, seq, outcome, detail, stage)
     }
 
+    /// The replay-guarded wire entry point for a `Draft`: gate + draft exactly as
+    /// [`handle_fresh`](Self::handle_fresh), then on success run the non-mutating
+    /// `dry_run` (Drafted -> DryRun) so the action is approval-ready. `Applied` iff BOTH
+    /// succeed; a gate refusal never reaches `dry_run`; a `dry_run` error is `Rejected`
+    /// (fail-closed). `stage` is always `None`.
+    pub fn handle_draft_fresh<A: AuditSink>(
+        &self,
+        bridge: &mut Bridge<A>,
+        guard: &mut ReplayGuard,
+        cmd: ControlCommand,
+        executor: &dyn Executor,
+    ) -> CommandResult {
+        let action_id = cmd.action_id.clone();
+        let actor = cmd.actor.clone();
+        let session = cmd.session.clone();
+        let seq = cmd.seq;
+        // `Bridge::draft` silently REPLACES an existing record (resetting state and
+        // payload), so a wire re-Draft of a live action would roll an approved action back
+        // to Drafted. Fail closed: refuse a Draft for an id the bridge already holds.
+        let result = if bridge.state(&action_id).is_some() {
+            Err(anyhow::anyhow!("action {action_id} already exists"))
+        } else {
+            dispatch_fresh(bridge, guard, cmd, self.verifier, self.authz)
+                .and_then(|()| bridge.dry_run(&action_id, executor, &actor))
+        };
+        let (outcome, detail) = match result {
+            Ok(_) => (CommandOutcome::Applied, "dry-run preview".to_string()),
+            Err(e) => (CommandOutcome::Rejected, e.to_string()),
+        };
+        self.sign_outcome(action_id, session, seq, outcome, detail, None)
+    }
+
     /// Map a lifecycle-dispatch `Result` to `(CommandOutcome, detail)`: Applied + `"applied"`
     /// on `Ok`, Rejected + the error text on `Err`. Shared by [`handle`](Self::handle) and
     /// [`handle_fresh`](Self::handle_fresh) so the lifecycle entry points cannot drift in how
@@ -844,6 +876,14 @@ impl<'a> AgentControlLoop<'a> {
                             self.verifier.as_ref(),
                         )
                     }
+                } else if matches!(cmd.kind, CommandKind::Draft(_)) {
+                    // Draft: gate + draft, then auto dry-run (Drafted -> DryRun).
+                    self.handler.handle_draft_fresh(
+                        bridge,
+                        &mut self.guard,
+                        cmd,
+                        self.executor.as_ref(),
+                    )
                 } else {
                     // Capture whether this is an Abort (+ its action_id) BEFORE the move so
                     // the kill switch also drops any scheduled command for the action.
@@ -1355,6 +1395,91 @@ mod tests {
             schedule: None,
             signature: String::new(),
         }
+    }
+
+    /// Benign executor for the auto-dry-run tests: previews only; any host-mutating
+    /// call (apply/rollback) panics, proving a Draft executes nothing.
+    struct NoMutateExecutor;
+    impl Executor for NoMutateExecutor {
+        fn preview(&self, _a: &RemediationAction) -> String {
+            "preview".into()
+        }
+        fn apply(&mut self, _a: &RemediationAction, _t: &str) -> anyhow::Result<()> {
+            panic!("a Draft must never apply");
+        }
+        fn rollback(&mut self, _a: &RemediationAction, _t: &str) -> anyhow::Result<()> {
+            panic!("a Draft must never roll back");
+        }
+    }
+
+    fn draft_fixture() -> (
+        CommandSigner,
+        Ed25519Verifier,
+        CommandSigner,
+        Bridge<VecAuditSink>,
+        ReplayGuard,
+    ) {
+        let operator = CommandSigner::from_seed("operator", [7u8; 32]);
+        let mut verifier = Ed25519Verifier::new();
+        verifier.trust(&operator.actor, operator.verifying_key());
+        let mut guard = ReplayGuard::new();
+        guard.open_session("s1", 0);
+        (
+            operator,
+            verifier,
+            agent_signer(),
+            Bridge::new(VecAuditSink::default()),
+            guard,
+        )
+    }
+
+    #[test]
+    fn draft_auto_dry_runs_to_dryrun() {
+        let (operator, verifier, agent, mut bridge, mut guard) = draft_fixture();
+        let handler = AgentControlHandler::new(&verifier, &AllowAll, &agent);
+        let mut cmd = draft_cmd("operator");
+        operator.sign(&mut cmd);
+
+        let result = handler.handle_draft_fresh(&mut bridge, &mut guard, cmd, &NoMutateExecutor);
+
+        assert_eq!(result.outcome, CommandOutcome::Applied);
+        assert!(result.stage.is_none());
+        assert_eq!(bridge.state("a"), Some(ActionState::DryRun));
+        assert!(bridge.submit_for_approval("a", "operator").is_ok());
+    }
+
+    #[test]
+    fn default_agent_draft_is_benign_and_executes_nothing() {
+        // Same wire path as the agent's default (preview-only) executor, via serve_one's
+        // routing contract: Applied, DryRun, and the executor's apply/rollback never run
+        // (NoMutateExecutor panics if they do).
+        let (operator, verifier, agent, mut bridge, mut guard) = draft_fixture();
+        let handler = AgentControlHandler::new(&verifier, &AllowAll, &agent);
+        let mut cmd = draft_cmd("operator");
+        operator.sign(&mut cmd);
+        let result = handler.handle_draft_fresh(&mut bridge, &mut guard, cmd, &NoMutateExecutor);
+        assert_eq!(result.outcome, CommandOutcome::Applied);
+        assert_eq!(bridge.state("a"), Some(ActionState::DryRun));
+    }
+
+    #[test]
+    fn duplicate_draft_is_rejected_fail_closed() {
+        let (operator, verifier, agent, mut bridge, mut guard) = draft_fixture();
+        let handler = AgentControlHandler::new(&verifier, &AllowAll, &agent);
+        let mut first = draft_cmd("operator");
+        operator.sign(&mut first);
+        handler.handle_draft_fresh(&mut bridge, &mut guard, first, &NoMutateExecutor);
+        let before = bridge.state("a");
+        assert_eq!(before, Some(ActionState::DryRun));
+
+        let mut second = draft_cmd("operator");
+        second.seq = 2;
+        operator.sign(&mut second);
+        let result = handler.handle_draft_fresh(&mut bridge, &mut guard, second, &NoMutateExecutor);
+
+        assert_eq!(result.outcome, CommandOutcome::Rejected);
+        assert!(result.stage.is_none());
+        assert_eq!(bridge.state("a"), before, "state unchanged on rejection");
     }
 
     #[test]
