@@ -185,7 +185,7 @@ fn mtls_round_trip_drives_the_unchanged_loop() {
     );
     assert_eq!(
         state,
-        Some(ActionState::Drafted),
+        Some(ActionState::DryRun),
         "the gated draft advanced the agent's bridge"
     );
 }
@@ -324,7 +324,7 @@ fn reconnect_with_same_cert_rejects_old_signed_command_and_accepts_current_sessi
     assert_eq!(agent_sessions, vec![old_session, current_session]);
     assert_eq!(
         states,
-        vec![Some(ActionState::Drafted), None, Some(ActionState::Drafted)]
+        vec![Some(ActionState::DryRun), None, Some(ActionState::DryRun)]
     );
 }
 #[test]
@@ -364,7 +364,7 @@ fn control_and_telemetry_use_physically_distinct_ports() {
 
     let (_s, served, state) = agent.join().expect("agent joins");
     assert!(served);
-    assert_eq!(state, Some(ActionState::Drafted));
+    assert_eq!(state, Some(ActionState::DryRun));
 
     // The telemetry listener received NO connection: its non-blocking accept would-block.
     match telemetry_listener.accept() {

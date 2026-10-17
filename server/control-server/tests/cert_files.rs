@@ -217,7 +217,7 @@ fn assert_round_trip(
     );
     assert_eq!(
         state,
-        Some(ActionState::Drafted),
+        Some(ActionState::DryRun),
         "the gated draft advanced the agent's bridge"
     );
 }

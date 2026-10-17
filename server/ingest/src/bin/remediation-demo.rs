@@ -193,11 +193,7 @@ fn approve_over_wire(
         client.await_result(ct).unwrap().expect("draft ack").outcome,
         torda_control_plane::CommandOutcome::Applied
     );
-    // dry_run is a LOCAL read-only preview (not a wire command); it moves Drafted -> DryRun, the
-    // state Submit requires — exactly as section [8] and the bridge state machine demand.
-    bridge
-        .dry_run(action_id, &DemoExec::default(), "alice")
-        .unwrap();
+    // The agent auto-dry-runs a wire Draft (Drafted -> DryRun), the state Submit requires.
     // seq 2: operator signs Submit.
     let mut submit = op_cmd(CommandKind::Submit, 2);
     client.sign(&mut submit);
@@ -801,7 +797,7 @@ fn main() {
     );
     assert_eq!(
         b4.state("fix-openssl-7"),
-        Some(ActionState::Drafted),
+        Some(ActionState::DryRun),
         "the bridge advanced from the wire command"
     );
     let state_after_wire_apply = b4.state("fix-openssl-7");
@@ -911,12 +907,8 @@ fn main() {
         r.outcome, r.detail
     );
     assert_eq!(r.outcome, torda_control_plane::CommandOutcome::Applied);
-    assert_eq!(b8.state("fix-openssl-8"), Some(ActionState::Drafted));
-    // dry_run is a LOCAL read-only preview (not a wire command).
-    let preview8 = b8
-        .dry_run("fix-openssl-8", &DemoExec::default(), "alice")
-        .unwrap();
-    println!("        local dry-run preview: {}", preview8.preview);
+    // The agent auto-dry-runs a wire Draft (Drafted -> DryRun).
+    assert_eq!(b8.state("fix-openssl-8"), Some(ActionState::DryRun));
 
     let r = op_step!(CommandKind::Submit, 2);
     println!(

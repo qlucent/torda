@@ -306,7 +306,26 @@ pub fn dispatch<A: AuditSink>(
 ) -> anyhow::Result<()> {
     authenticate_and_authorize(bridge, &cmd, sig, authz)?;
     match cmd.kind {
-        CommandKind::Draft(action) => bridge.draft(*action, &cmd.actor),
+        CommandKind::Draft(action) => {
+            // Post-authn: `Bridge::draft` REPLACES an existing record (resetting its
+            // state/payload), so refuse to re-Draft a live action (fail closed).
+            // The embedded id must match the command's id so draft and the follow-up
+            // dry-run operate on the same record.
+            if action.id != cmd.action_id {
+                let why = format!(
+                    "draft id mismatch: command {} vs action {}",
+                    cmd.action_id, action.id
+                );
+                bridge.audit_rejected_command(&cmd.action_id, &cmd.actor, &why);
+                anyhow::bail!(why);
+            }
+            if bridge.state(&action.id).is_some() {
+                let why = format!("action {} already exists", action.id);
+                bridge.audit_rejected_command(&action.id, &cmd.actor, &why);
+                anyhow::bail!(why);
+            }
+            bridge.draft(*action, &cmd.actor)
+        }
         CommandKind::Submit => bridge.submit_for_approval(&cmd.action_id, &cmd.actor),
         CommandKind::Approve => bridge.approve(&cmd.action_id, &cmd.actor),
         CommandKind::Reject { reason } => bridge.reject(&cmd.action_id, &cmd.actor, &reason),

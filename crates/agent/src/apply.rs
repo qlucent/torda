@@ -297,6 +297,26 @@ mod tests {
         assert!(!err.contains("SECRET"), "error must not leak output");
     }
 
+    // Auto-dry-run on Draft calls preview on the apply-enabled executor; it must
+    // describe only — never spawn the payload.
+    #[test]
+    fn real_executor_preview_does_not_execute() {
+        let sentinel = std::env::temp_dir().join(format!(
+            "torda_preview_sentinel_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_file(&sentinel);
+        let ex = RealExecutor::new(cfg(30));
+        let payload = format!("echo x > \"{}\"", sentinel.display());
+        let out = ex.preview(&action(Method::Shell, &payload, None, &["h1"]));
+        assert!(!out.is_empty());
+        assert!(!sentinel.exists(), "preview must not run the payload");
+    }
+
     #[test]
     fn rollback_runs_when_present_and_noops_when_absent() {
         let mut ex = RealExecutor::new(cfg(30));

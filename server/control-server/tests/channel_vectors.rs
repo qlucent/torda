@@ -173,7 +173,7 @@ fn authorized_command_round_trips_over_the_wire() {
     assert_eq!(result.outcome, CommandOutcome::Applied);
     assert_eq!(
         bridge.state("a"),
-        Some(ActionState::Drafted),
+        Some(ActionState::DryRun),
         "the gated draft was applied over the wire"
     );
 }
@@ -247,7 +247,7 @@ fn command_replay_over_the_wire_is_rejected_by_the_loop_guard() {
         .expect("first result");
     assert_eq!(r1.outcome, CommandOutcome::Applied);
     let state_after_apply = bridge.state("a");
-    assert_eq!(state_after_apply, Some(ActionState::Drafted));
+    assert_eq!(state_after_apply, Some(ActionState::DryRun));
 
     // Replay the SAME command: the loop's replay guard refuses the stale seq.
     client.send_command(&mut client_t, cmd2).unwrap();
@@ -531,22 +531,9 @@ fn full_lifecycle_including_execution_over_the_wire() {
         client.await_result(&mut client_t).unwrap().unwrap().outcome,
         CommandOutcome::Applied
     );
-    assert_eq!(bridge.state("a"), Some(ActionState::Drafted));
+    assert_eq!(bridge.state("a"), Some(ActionState::DryRun));
 
-    // dry_run is a LOCAL read-only preview (not a wire command), exactly as the demo does.
-    struct Preview;
-    impl Executor for Preview {
-        fn preview(&self, _a: &RemediationAction) -> String {
-            "preview".into()
-        }
-        fn apply(&mut self, _a: &RemediationAction, _t: &str) -> anyhow::Result<()> {
-            Ok(())
-        }
-        fn rollback(&mut self, _a: &RemediationAction, _t: &str) -> anyhow::Result<()> {
-            Ok(())
-        }
-    }
-    bridge.dry_run("a", &Preview, "operator").unwrap();
+    // The agent already auto-dry-ran the wire Draft (asserted above).
 
     // Submit (Operator, seq 2) over the wire.
     let mut submit = wire_cmd(CommandKind::Submit, "operator", 2);
